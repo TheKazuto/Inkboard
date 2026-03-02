@@ -16,7 +16,7 @@ import { SORA } from '@/lib/styles'
 // Set NEXT_PUBLIC_LIFI_FEE as decimal (e.g. "0.02" = 2%)
 const LIFI_API       = 'https://li.quest/v1'
 const INTEGRATOR     = process.env.NEXT_PUBLIC_LIFI_INTEGRATOR ?? 'inkboard'
-const INTEGRATOR_FEE = parseFloat(process.env.NEXT_PUBLIC_LIFI_FEE ?? '0')  // 0 = no fee
+const INTEGRATOR_FEE = parseFloat(process.env.NEXT_PUBLIC_LIFI_FEE ?? '0.002')  // 0.2% integrator fee
 const NATIVE         = '0x0000000000000000000000000000000000000000'
 
 // ─── TYPES ──────────────────────────────────────────────────────────────────
