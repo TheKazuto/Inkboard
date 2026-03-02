@@ -419,13 +419,13 @@ export default function PortfolioPage() {
 
               {nfts.length > 0 && nftView === 'grid' && (
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-                  {nfts.map(nft => <NFTCard key={nft.id} nft={nft} />)}
+                  {[...nfts].sort((a, b) => b.floorUSD - a.floorUSD).map(nft => <NFTCard key={nft.id} nft={nft} />)}
                 </div>
               )}
 
               {nfts.length > 0 && nftView === 'list' && (
                 <div className="-mx-5 -mb-5">
-                  {nfts.map(nft => <NFTListRow key={nft.id} nft={nft} />)}
+                  {[...nfts].sort((a, b) => b.floorUSD - a.floorUSD).map(nft => <NFTListRow key={nft.id} nft={nft} />)}
                 </div>
               )}
 
