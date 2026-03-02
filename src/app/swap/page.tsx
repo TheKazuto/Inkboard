@@ -13,7 +13,7 @@ import { SORA } from '@/lib/styles'
 // ─── LI.FI INTEGRATOR CONFIG ────────────────────────────────────────────────
 // Register at https://docs.li.fi/monetization-take-fees to start collecting fees
 // Set NEXT_PUBLIC_LIFI_INTEGRATOR in .env.local (e.g. "inkboard")
-// Set NEXT_PUBLIC_LIFI_FEE as decimal (e.g. "0.02" = 2%)
+// Set NEXT_PUBLIC_LIFI_FEE as decimal (e.g. "0.002" = 0.2%)
 const LIFI_API       = 'https://li.quest/v1'
 const INTEGRATOR     = process.env.NEXT_PUBLIC_LIFI_INTEGRATOR ?? 'inkboard'
 const INTEGRATOR_FEE = parseFloat(process.env.NEXT_PUBLIC_LIFI_FEE ?? '0.002')  // 0.2% integrator fee
@@ -161,13 +161,20 @@ function ChainImage({ chain, size = 28 }: { chain: LifiChain; size?: number }) {
   return <FallbackImage key={String(chain.id)} urls={urls} symbol={chain.name} size={size} />
 }
 
-// ─── LI.FI API HELPERS ──────────────────────────────────────────────────────
+// ─── LI.FI API HELPERS (via server-side proxies) ────────────────────────────
+// FIX #1 & #2: Use internal API routes as proxies instead of calling li.quest
+// directly from the browser. This avoids CORS / ad-blocker / CSP issues.
+
 let cachedChains: LifiChain[] | null = null
+
+// Also cache RPC URLs extracted from chain metadata for balance fetching
+const chainRpcCache: Record<number, string> = {}
 
 async function loadChains(): Promise<LifiChain[]> {
   if (cachedChains) return cachedChains
   try {
-    const res = await fetch(`${LIFI_API}/chains?chainTypes=EVM`)
+    // Fetch via our own Next.js API proxy (server-side, no CORS)
+    const res = await fetch('/api/lifi-chains')
     if (!res.ok) throw new Error(`${res.status}`)
     const data: { chains: LifiChain[] } = await res.json()
     const priority = [57073, 1, 42161, 10, 8453, 137, 56, 43114, 250, 100]
@@ -181,14 +188,26 @@ async function loadChains(): Promise<LifiChain[]> {
         if (bi !== -1) return 1
         return a.name.localeCompare(b.name)
       })
+    // Extract RPC URLs from chain metadata for dynamic balance fetching
+    for (const c of cachedChains) {
+      if (c.metamask?.rpcUrls?.[0]) {
+        chainRpcCache[c.id] = c.metamask.rpcUrls[0]
+      }
+    }
     return cachedChains
   } catch {
+    // Do NOT cache fallback — next mount can retry
     return [
-      { id: 57073, key: 'ink', name: 'Ink', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH } },
-      { id: 1, key: 'eth', name: 'Ethereum', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH } },
-      { id: 42161, key: 'arb', name: 'Arbitrum', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH } },
-      { id: 10, key: 'opt', name: 'Optimism', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH } },
-      { id: 8453, key: 'bas', name: 'Base', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH } },
+      { id: 57073, key: 'ink', name: 'Ink', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH }, metamask: { blockExplorerUrls: ['https://explorer.inkonchain.com/'], rpcUrls: ['https://rpc-gel.inkonchain.com'], chainName: 'Ink' } },
+      { id: 1, key: 'eth', name: 'Ethereum', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH }, metamask: { blockExplorerUrls: ['https://etherscan.io/'], rpcUrls: ['https://ethereum-rpc.publicnode.com'], chainName: 'Ethereum' } },
+      { id: 42161, key: 'arb', name: 'Arbitrum', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH }, metamask: { blockExplorerUrls: ['https://arbiscan.io/'], rpcUrls: ['https://arb1.arbitrum.io/rpc'], chainName: 'Arbitrum One' } },
+      { id: 10, key: 'opt', name: 'Optimism', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH }, metamask: { blockExplorerUrls: ['https://optimistic.etherscan.io/'], rpcUrls: ['https://mainnet.optimism.io'], chainName: 'OP Mainnet' } },
+      { id: 8453, key: 'bas', name: 'Base', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH }, metamask: { blockExplorerUrls: ['https://basescan.org/'], rpcUrls: ['https://mainnet.base.org'], chainName: 'Base' } },
+      { id: 137, key: 'pol', name: 'Polygon', chainType: 'EVM', coin: 'POL', logoURI: '', nativeToken: { address: NATIVE, symbol: 'POL', name: 'POL', decimals: 18, logoURI: OVERRIDE_LOGOS.POL }, metamask: { blockExplorerUrls: ['https://polygonscan.com/'], rpcUrls: ['https://polygon-rpc.com'], chainName: 'Polygon' } },
+      { id: 56, key: 'bsc', name: 'BSC', chainType: 'EVM', coin: 'BNB', logoURI: '', nativeToken: { address: NATIVE, symbol: 'BNB', name: 'BNB', decimals: 18, logoURI: OVERRIDE_LOGOS.BNB }, metamask: { blockExplorerUrls: ['https://bscscan.com/'], rpcUrls: ['https://bsc-rpc.publicnode.com'], chainName: 'BNB Smart Chain' } },
+      { id: 43114, key: 'ava', name: 'Avalanche', chainType: 'EVM', coin: 'AVAX', logoURI: '', nativeToken: { address: NATIVE, symbol: 'AVAX', name: 'Avalanche', decimals: 18, logoURI: OVERRIDE_LOGOS.AVAX }, metamask: { blockExplorerUrls: ['https://snowtrace.io/'], rpcUrls: ['https://api.avax.network/ext/bc/C/rpc'], chainName: 'Avalanche C-Chain' } },
+      { id: 250, key: 'ftm', name: 'Fantom', chainType: 'EVM', coin: 'FTM', logoURI: '', nativeToken: { address: NATIVE, symbol: 'FTM', name: 'Fantom', decimals: 18, logoURI: '' }, metamask: { blockExplorerUrls: ['https://ftmscan.com/'], rpcUrls: ['https://rpc.ftm.tools'], chainName: 'Fantom Opera' } },
+      { id: 100, key: 'dai', name: 'Gnosis', chainType: 'EVM', coin: 'XDAI', logoURI: '', nativeToken: { address: NATIVE, symbol: 'XDAI', name: 'xDAI', decimals: 18, logoURI: '' }, metamask: { blockExplorerUrls: ['https://gnosisscan.io/'], rpcUrls: ['https://rpc.gnosischain.com'], chainName: 'Gnosis' } },
     ]
   }
 }
@@ -200,7 +219,8 @@ async function loadTokensForChain(chainId: number): Promise<LifiToken[]> {
   const cached = tokenListCache[chainId]
   if (cached && Date.now() - cached.ts < TOKEN_CACHE_TTL) return cached.tokens
   try {
-    const res = await fetch(`${LIFI_API}/tokens?chains=${chainId}`)
+    // FIX #1: Fetch via our own Next.js API proxy (server-side, no CORS)
+    const res = await fetch(`/api/lifi-tokens?chain=${chainId}`)
     if (!res.ok) throw new Error(`${res.status}`)
     const data: { tokens: Record<string, LifiToken[]> } = await res.json()
     const tokens = data.tokens[String(chainId)] ?? []
@@ -211,7 +231,7 @@ async function loadTokensForChain(chainId: number): Promise<LifiToken[]> {
     tokenListCache[chainId] = { tokens: result, ts: Date.now() }
     return result
   } catch {
-    tokenListCache[chainId] = { tokens: [], ts: Date.now() }
+    // Do NOT cache empty results on error — next open can retry
     return []
   }
 }
@@ -257,8 +277,9 @@ async function fetchStatus(tool: string, fromChainId: number, toChainId: number,
   }>
 }
 
-// RPC endpoints for balance checking
-const CHAIN_RPC: Record<number, string> = {
+// FIX #3: Use dynamic RPC from LI.FI chain metadata instead of hardcoded list.
+// Fallback to well-known public RPCs if chain metadata isn't loaded yet.
+const FALLBACK_RPC: Record<number, string> = {
   1: 'https://ethereum-rpc.publicnode.com', 56: 'https://bsc-rpc.publicnode.com',
   137: 'https://polygon-rpc.com', 42161: 'https://arb1.arbitrum.io/rpc',
   10: 'https://mainnet.optimism.io', 8453: 'https://mainnet.base.org',
@@ -266,6 +287,11 @@ const CHAIN_RPC: Record<number, string> = {
   250: 'https://rpc.ftm.tools', 100: 'https://rpc.gnosischain.com',
   324: 'https://mainnet.era.zksync.io', 59144: 'https://rpc.linea.build',
   534352: 'https://rpc.scroll.io', 5000: 'https://rpc.mantle.xyz', 81457: 'https://rpc.blast.io',
+}
+
+function getRpcUrl(chain: LifiChain): string | null {
+  // Priority: chain metadata from LI.FI → cached from loadChains → hardcoded fallback
+  return chain.metamask?.rpcUrls?.[0] ?? chainRpcCache[chain.id] ?? FALLBACK_RPC[chain.id] ?? null
 }
 
 const ERC20_APPROVE_ABI = [{
@@ -286,6 +312,7 @@ const USDC_INK: LifiToken = {
 const INK_CHAIN: LifiChain = {
   id: 57073, key: 'ink', name: 'Ink', chainType: 'EVM', coin: 'ETH', logoURI: '',
   nativeToken: INK_NATIVE,
+  metamask: { blockExplorerUrls: ['https://explorer.inkonchain.com/'], rpcUrls: ['https://rpc-gel.inkonchain.com'], chainName: 'Ink' },
 }
 
 // ─── CHAIN SELECTOR MODAL ───────────────────────────────────────────────────
@@ -338,7 +365,12 @@ function TokenModal({ chain, onSelect, onClose }: {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    loadTokensForChain(chain.id).then(t => { setTokens(t); setLoading(false) })
+    let cancelled = false
+    setLoading(true)
+    loadTokensForChain(chain.id).then(t => {
+      if (!cancelled) { setTokens(t); setLoading(false) }
+    })
+    return () => { cancelled = true }
   }, [chain.id])
 
   const filtered = tokens.filter(t =>
@@ -426,13 +458,13 @@ export default function SwapPage() {
   const quoteAgeRef    = useRef<ReturnType<typeof setInterval> | null>(null)
   const pollCleanupRef = useRef<(() => void) | null>(null)
 
-  // ── Balance via RPC ───────────────────────────────────────────────────────
+  // ── FIX #3: Balance via RPC — uses dynamic RPC from chain metadata ────────
   const [fromBalance, setFromBalance] = useState<number | null>(null)
 
   useEffect(() => {
     setFromBalance(null)
     if (!address || !isConnected) return
-    const rpc = CHAIN_RPC[fromChain.id]
+    const rpc = getRpcUrl(fromChain)
     if (!rpc) return
     const controller = new AbortController()
     const isNative = fromToken.address === NATIVE
@@ -441,7 +473,7 @@ export default function SwapPage() {
       try {
         let raw: bigint
         if (isNative) {
-          const res = await fetch(rpc, {
+          const res = await fetch(rpc!, {
             method: 'POST', signal: controller.signal,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getBalance', params: [address, 'latest'] }),
@@ -450,7 +482,7 @@ export default function SwapPage() {
           raw = BigInt(d.result ?? '0x0')
         } else {
           const padded = address!.replace('0x', '').padStart(64, '0')
-          const res = await fetch(rpc, {
+          const res = await fetch(rpc!, {
             method: 'POST', signal: controller.signal,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -462,11 +494,11 @@ export default function SwapPage() {
           raw = BigInt(d.result && d.result !== '0x' ? d.result : '0x0')
         }
         setFromBalance(Number(raw) / Math.pow(10, fromToken.decimals ?? 18))
-      } catch { /* aborted */ }
+      } catch { /* aborted or RPC error */ }
     }
     fetchBal()
     return () => controller.abort()
-  }, [address, isConnected, fromChain.id, fromToken.address, fromToken.decimals])
+  }, [address, isConnected, fromChain, fromToken.address, fromToken.decimals])
 
   const fromBalanceDisplay = fromBalance !== null
     ? fromBalance < 0.0001 && fromBalance > 0 ? '<0.0001'
@@ -474,10 +506,14 @@ export default function SwapPage() {
     : null
 
   function handleMax() {
-    if (fromBalance === null) return
+    if (fromBalance === null || fromBalance <= 0) return
     const buffer = fromToken.address === NATIVE ? (GAS_BUFFER[fromChain.id] ?? 0.002) : 0
     const maxAmt = Math.max(0, fromBalance - buffer)
-    setAmount(maxAmt > 0 ? maxAmt.toString() : '')
+    // Use full precision string to avoid rounding issues
+    const maxStr = maxAmt > 0
+      ? maxAmt.toFixed(Math.min(fromToken.decimals ?? 18, 8)).replace(/0+$/, '').replace(/\.$/, '')
+      : ''
+    setAmount(maxStr)
   }
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -670,7 +706,7 @@ export default function SwapPage() {
             </button>
             <div className="flex-1 flex flex-col items-end gap-1 min-w-0">
               <input type="number" min="0" placeholder="0.00" value={amount}
-                onChange={e => { const v = e.target.value; if (v === '' || Number(v) > 0) setAmount(v) }}
+                onChange={e => { const v = e.target.value; if (v === '' || Number(v) >= 0) setAmount(v) }}
                 className="w-full bg-transparent text-right text-2xl font-semibold text-gray-800 outline-none placeholder-gray-300" />
               {isConnected && fromBalanceDisplay !== null && (
                 <div className="flex items-center gap-1.5">
