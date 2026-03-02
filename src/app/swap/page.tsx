@@ -462,10 +462,13 @@ export default function SwapPage() {
   const pollCleanupRef = useRef<(() => void) | null>(null)
 
   // ── FIX #3: Balance via RPC — uses dynamic RPC from chain metadata ────────
-  const [fromBalance, setFromBalance] = useState<number | null>(null)
+  // Store raw balance as BigInt string to avoid Number precision loss
+  // (ETH wei values easily exceed Number.MAX_SAFE_INTEGER)
+  const [fromBalanceRaw, setFromBalanceRaw] = useState<string | null>(null)  // wei string
+  const fromDecimals = fromToken.decimals ?? 18
 
   useEffect(() => {
-    setFromBalance(null)
+    setFromBalanceRaw(null)
     if (!address || !isConnected) return
     const rpc = getRpcUrl(fromChain)
     if (!rpc) return
@@ -496,27 +499,52 @@ export default function SwapPage() {
           const d = await res.json()
           raw = BigInt(d.result && d.result !== '0x' ? d.result : '0x0')
         }
-        setFromBalance(Number(raw) / Math.pow(10, fromToken.decimals ?? 18))
+        setFromBalanceRaw(raw.toString())
       } catch { /* aborted or RPC error */ }
     }
     fetchBal()
     return () => controller.abort()
   }, [address, isConnected, fromChain, fromToken.address, fromToken.decimals])
 
-  const fromBalanceDisplay = fromBalance !== null
-    ? fromBalance < 0.0001 && fromBalance > 0 ? '<0.0001'
-      : fromBalance.toLocaleString('en-US', { maximumFractionDigits: 6 })
-    : null
+  // Convert BigInt wei string → human-readable string with full precision
+  function weiToHuman(weiStr: string, decimals: number): string {
+    if (weiStr === '0') return '0'
+    const padded = weiStr.padStart(decimals + 1, '0')
+    const intPart = padded.slice(0, padded.length - decimals) || '0'
+    const fracPart = padded.slice(padded.length - decimals)
+    // Trim trailing zeros from fraction
+    const trimmed = fracPart.replace(/0+$/, '')
+    return trimmed ? `${intPart}.${trimmed}` : intPart
+  }
+
+  const fromBalanceHuman = fromBalanceRaw !== null ? weiToHuman(fromBalanceRaw, fromDecimals) : null
+
+  const fromBalanceDisplay = useMemo(() => {
+    if (fromBalanceHuman === null) return null
+    const num = parseFloat(fromBalanceHuman)
+    if (num === 0) return '0'
+    if (num < 0.0001) return '<0.0001'
+    return num.toLocaleString('en-US', { maximumFractionDigits: 6 })
+  }, [fromBalanceHuman])
 
   function handleMax() {
-    if (fromBalance === null || fromBalance <= 0) return
-    const buffer = fromToken.address === NATIVE ? (GAS_BUFFER[fromChain.id] ?? 0.002) : 0
-    const maxAmt = Math.max(0, fromBalance - buffer)
-    // Use full precision string to avoid rounding issues
-    const maxStr = maxAmt > 0
-      ? maxAmt.toFixed(Math.min(fromToken.decimals ?? 18, 8)).replace(/0+$/, '').replace(/\.$/, '')
-      : ''
-    setAmount(maxStr)
+    if (fromBalanceRaw === null || fromBalanceRaw === '0') return
+    const isNative = fromToken.address === NATIVE
+    const bufferHuman = isNative ? (GAS_BUFFER[fromChain.id] ?? 0.002) : 0
+
+    if (bufferHuman === 0) {
+      // ERC-20: use exact full balance (no buffer needed)
+      setAmount(fromBalanceHuman!)
+      return
+    }
+
+    // Native token: subtract gas buffer using BigInt math for precision
+    const bufferWei = BigInt(Math.floor(bufferHuman * Math.pow(10, fromDecimals)))
+    const rawBig = BigInt(fromBalanceRaw)
+    const maxWei = rawBig > bufferWei ? rawBig - bufferWei : 0n
+    if (maxWei === 0n) { setAmount(''); return }
+
+    setAmount(weiToHuman(maxWei.toString(), fromDecimals))
   }
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
