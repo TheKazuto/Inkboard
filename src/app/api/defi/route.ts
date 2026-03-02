@@ -39,7 +39,6 @@ const COINGECKO_IDS: Record<string, string> = {
   frxETH: 'frax-ether',
   CRV:    'curve-dao-token',
   FXS:    'frax-share',
-  WETH:   'ethereum',
   WBTC:   'wrapped-bitcoin',
   USDC:   'usd-coin',
   USDT0:  'tether',
