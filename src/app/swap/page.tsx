@@ -14,7 +14,8 @@ import { SORA } from '@/lib/styles'
 // Register at https://docs.li.fi/monetization-take-fees to start collecting fees
 // Set NEXT_PUBLIC_LIFI_INTEGRATOR in .env.local (e.g. "inkboard")
 // Set NEXT_PUBLIC_LIFI_FEE as decimal (e.g. "0.002" = 0.2%)
-const LIFI_API       = 'https://li.quest/v1'
+// All LI.FI API calls go through server-side proxies (/api/lifi-*)
+// to avoid CORS and ad-blocker issues in the browser.
 const INTEGRATOR     = process.env.NEXT_PUBLIC_LIFI_INTEGRATOR ?? 'inkboard'
 const INTEGRATOR_FEE = parseFloat(process.env.NEXT_PUBLIC_LIFI_FEE ?? '0.002')  // 0.2% integrator fee
 const NATIVE         = '0x0000000000000000000000000000000000000000'
@@ -256,7 +257,8 @@ async function fetchQuote(
   if (INTEGRATOR_FEE > 0) params.set('fee', String(INTEGRATOR_FEE))
   if (toAddress && toAddress !== fromAddress) params.set('toAddress', toAddress)
 
-  const res = await fetch(`${LIFI_API}/quote?${params}`)
+  // Use server-side proxy to avoid CORS / ad-blocker issues
+  const res = await fetch(`/api/lifi-quote?${params}`)
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.message ?? `${res.status}`)
@@ -268,7 +270,8 @@ async function fetchStatus(tool: string, fromChainId: number, toChainId: number,
   const params = new URLSearchParams({
     bridge: tool, fromChain: String(fromChainId), toChain: String(toChainId), txHash,
   })
-  const res = await fetch(`${LIFI_API}/status?${params}`)
+  // Use server-side proxy to avoid CORS / ad-blocker issues
+  const res = await fetch(`/api/lifi-status?${params}`)
   if (!res.ok) throw new Error(`${res.status}`)
   return res.json() as Promise<{
     status: string
