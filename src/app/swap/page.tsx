@@ -10,105 +10,96 @@ import { useSendTransaction, useChainId, useSwitchChain } from 'wagmi'
 import { encodeFunctionData } from 'viem'
 import { SORA } from '@/lib/styles'
 
-// ─── INTEGRATOR CONFIG ────────────────────────────────────────────────────────
-// Set NEXT_PUBLIC_FEE_RECEIVER in .env.local to your wallet address to earn 0.2% swap fees
-// Leave unset to disable fee collection (swap will still work normally)
-// Fix #10 (MÉDIO): Removed the hardcoded fallback wallet address.
-// When NEXT_PUBLIC_FEE_RECEIVER is not set, fee collection is simply disabled.
-// This prevents the developer's wallet address from appearing in the public bundle.
-const FEE_RECEIVER = process.env.NEXT_PUBLIC_FEE_RECEIVER ?? ''
-const FEE_PERCENT  = 0.2
-const REFERRER     = 'inkboard.xyz'
-const NATIVE       = '0x0000000000000000000000000000000000000000'
+// ─── LI.FI INTEGRATOR CONFIG ────────────────────────────────────────────────
+// Register at https://docs.li.fi/monetization-take-fees to start collecting fees
+// Set NEXT_PUBLIC_LIFI_INTEGRATOR in .env.local (e.g. "inkboard")
+// Set NEXT_PUBLIC_LIFI_FEE as decimal (e.g. "0.02" = 2%)
+const LIFI_API       = 'https://li.quest/v1'
+const INTEGRATOR     = process.env.NEXT_PUBLIC_LIFI_INTEGRATOR ?? 'inkboard'
+const INTEGRATOR_FEE = parseFloat(process.env.NEXT_PUBLIC_LIFI_FEE ?? '0')  // 0 = no fee
+const NATIVE         = '0x0000000000000000000000000000000000000000'
 
-// ─── TYPES ────────────────────────────────────────────────────────────────────
-interface Chain {
-  id:   number
-  name: string       // "ETH", "INK", etc — used in Rubic API
-  type: string       // "EVM", "SOLANA", etc
+// ─── TYPES ──────────────────────────────────────────────────────────────────
+interface LifiChain {
+  id:        number
+  key:       string
+  name:      string
+  chainType: string
+  coin:      string
+  logoURI:   string
+  nativeToken: LifiToken
+  metamask?: {
+    blockExplorerUrls: string[]
+    rpcUrls: string[]
+    chainName: string
+  }
 }
 
-interface Token {
+interface LifiToken {
+  address:  string
   symbol:   string
   name:     string
-  address:  string
   decimals: number
-  logoURI:  string
   chainId?: number
+  logoURI:  string
+  priceUSD?: string
+  coinKey?:  string
 }
 
-// ─── CHAIN DISPLAY HELPERS ───────────────────────────────────────────────────
-// Map Rubic chain name → CoinGecko token list platform slug
-// tokens.coingecko.com/{platform}/all.json — free, no API key, logos included
-const COINGECKO_PLATFORM: Record<string, string> = {
-  ETH:       'ethereum',
-  BSC:       'binance-smart-chain',
-  POLYGON:   'polygon-pos',
-  AVALANCHE: 'avalanche',
-  ARBITRUM:  'arbitrum-one',
-  OPTIMISM:  'optimistic-ethereum',
-  BASE:      'base',
-  SOLANA:    'solana',
-  FANTOM:    'fantom',
-  AURORA:    'aurora',
-  CELO:      'celo',
-  HARMONY:   'harmony-shard-0',
-  MOONBEAM:  'moonbeam',
-  MOONRIVER: 'moonriver',
-  CRONOS:    'cronos',
-  GNOSIS:    'xdai',
-  KLAYTN:    'klay-token',
-  BOBA:      'boba',
-  OKT:       'okex-chain',
-  TELOS:     'telos',
-  FUSE:      'fuse',
-  IOTEX:     'iotex',
-  TRON:      'tron',
-  NEAR:      'near-protocol',
-  LINEA:     'linea',
-  ZKSYNC:    'zksync',
-  SCROLL:    'scroll',
-  MANTLE:    'mantle',
-  BLAST:     'blast',
-  METIS:     'metis-andromeda',
-  ZK_FAIR:   'zkfair',
-  INK:       'ink',   // served via GeckoTerminal (not CoinGecko token list)
+interface LifiQuote {
+  id:   string
+  type: string
+  tool: string
+  toolDetails?: { key: string; name: string; logoURI: string }
+  action: {
+    fromChainId: number
+    toChainId:   number
+    fromToken:   LifiToken
+    toToken:     LifiToken
+    fromAmount:  string
+    slippage:    number
+    toAddress?:  string
+  }
+  estimate: {
+    fromAmount:        string
+    toAmount:          string
+    toAmountMin:       string
+    approvalAddress?:  string
+    executionDuration: number
+    gasCosts?:         { amountUSD: string }[]
+    feeCosts?:         { amountUSD: string; name: string }[]
+    fromAmountUSD?:    string
+    toAmountUSD?:      string
+  }
+  transactionRequest?: {
+    from:      string
+    to:        string
+    data:      string
+    value:     string
+    gasLimit?: string
+    gasPrice?: string
+    chainId?:  number
+  }
+  includedSteps?: {
+    type: string
+    tool: string
+    toolDetails?: { name: string }
+    estimate?: { executionDuration: number }
+  }[]
 }
 
-// ─── LOGO CDN SOURCES ────────────────────────────────────────────────────────
-const TW_BASE  = 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains'
-const UNI_BASE = 'https://raw.githubusercontent.com/Uniswap/assets/master/blockchains'
-const LLAMA    = 'https://icons.llamao.fi/icons/chains'
+// ─── SLIPPAGE DEFAULTS ──────────────────────────────────────────────────────
+const SLIPPAGE_ON_CHAIN = 0.01
+const SLIPPAGE_CROSS    = 0.02
 
-// DefiLlama slugs for supported chains
-const LLAMA_SLUG: Record<string, string> = {
-  ETH: 'ethereum',       BSC: 'binance',          POLYGON: 'polygon',
-  ARBITRUM: 'arbitrum',  OPTIMISM: 'optimism',     BASE: 'base',
-  AVALANCHE: 'avalanche', SOLANA: 'solana',        INK: 'ink',
-  FANTOM: 'fantom',      CRONOS: 'cronos',         GNOSIS: 'gnosis',
-  CELO: 'celo',          HARMONY: 'harmony',       MOONBEAM: 'moonbeam',
-  MOONRIVER: 'moonriver', AURORA: 'aurora',        BOBA: 'boba',
-  METIS: 'metis',        LINEA: 'linea',           ZKSYNC: 'zksync%20era',
-  SCROLL: 'scroll',      MANTLE: 'mantle',         BLAST: 'blast',
-  KLAYTN: 'klaytn',      KAVA: 'kava',             IOTEX: 'iotex',
-  TON: 'ton',            NEAR: 'near',             TRON: 'tron',
-  BITCOIN: 'bitcoin',    FUSE: 'fuse',             OKT: 'okexchain',
-  ROOTSTOCK: 'rootstock', FLARE: 'flare',          TELOS: 'telos',
+// ─── GAS BUFFER for MAX button ──────────────────────────────────────────────
+const GAS_BUFFER: Record<number, number> = {
+  1: 0.003, 10: 0.001, 56: 0.003, 137: 0.5, 8453: 0.001,
+  42161: 0.001, 43114: 0.01, 57073: 0.001, 250: 1.0, 100: 0.1,
+  324: 0.001, 59144: 0.001, 534352: 0.001, 5000: 0.5, 81457: 0.001,
 }
 
-// TrustWallet slugs — fallback (AVALANCHE missing, ZKSYNC uses wrong slug)
-const TW_CHAIN_SLUG: Record<string, string> = {
-  ETH: 'ethereum',   BSC: 'smartchain', POLYGON: 'polygon',
-  ARBITRUM: 'arbitrum', OPTIMISM: 'optimism', BASE: 'base',
-  SOLANA: 'solana',  FANTOM: 'fantom',  CRONOS: 'cronos',
-  GNOSIS: 'xdai',    CELO: 'celo',      HARMONY: 'harmony',
-  MOONBEAM: 'moonbeam', MOONRIVER: 'moonriver', AURORA: 'aurora',
-  BOBA: 'boba',      METIS: 'metis',    LINEA: 'linea',
-  SCROLL: 'scroll',  MANTLE: 'mantle',  BLAST: 'blast',
-  INK: 'ink',
-}
-
-// CoinGecko CDN overrides for well-known tokens by symbol
+// ─── WELL-KNOWN LOGO OVERRIDES ──────────────────────────────────────────────
 const CG = 'https://assets.coingecko.com/coins/images'
 const OVERRIDE_LOGOS: Record<string, string> = {
   ETH:  `${CG}/279/small/ethereum.png`,
@@ -117,113 +108,21 @@ const OVERRIDE_LOGOS: Record<string, string> = {
   USDT: `${CG}/325/small/tether.png`,
   WBTC: `${CG}/7598/small/wrapped_bitcoin_new.png`,
   BNB:  `${CG}/825/small/bnb-icon2_2x.png`,
-  WBNB: `${CG}/825/small/bnb-icon2_2x.png`,
   POL:  `${CG}/4713/small/polygon-ecosystem-token.png`,
   MATIC:`${CG}/4713/small/polygon-ecosystem-token.png`,
   AVAX: `${CG}/12559/small/Avalanche_Circle_RedWhite_Trans.png`,
   SOL:  `${CG}/4128/small/solana.png`,
-  // Ink - ETH on Ink chain
-  ETH_INK: 'https://cryptologos.cc/logos/ethereum-eth-logo.png',
-  WETH_INK: 'https://cryptologos.cc/logos/ethereum-eth-logo.png',
-  ARB:  `${CG}/16547/small/arb.jpg`,
-  OP:   `${CG}/25244/small/Optimism.png`,
-  FTM:  `${CG}/4001/small/fantom.png`,
-  NEAR: `${CG}/10365/small/near.jpg`,
-  ATOM: `${CG}/1481/small/cosmos_hub.png`,
   DAI:  `${CG}/9956/small/Badge_Dai.png`,
   LINK: `${CG}/877/small/chainlink-new-logo.png`,
   UNI:  `${CG}/12504/small/uniswap-logo.png`,
-  AAVE: `${CG}/12645/small/AAVE.png`,
   CRV:  `${CG}/12124/small/Curve.png`,
-  MKR:  `${CG}/1364/small/Mark_Maker.png`,
-  SNX:  `${CG}/3408/small/SNX.png`,
-  COMP: `${CG}/10775/small/COMP.png`,
-  GRT:  `${CG}/13397/small/Graph_Token.png`,
-  LDO:  `${CG}/13573/small/Lido_DAO.png`,
-  RPL:  `${CG}/2090/small/rocket_pool__rpl_.png`,
-  DOGE: `${CG}/5/small/dogecoin.png`,
-  SHIB: `${CG}/11939/small/shiba.png`,
-  PEPE: `${CG}/29850/small/pepe-token.jpeg`,
-  TRX:  `${CG}/1094/small/tron-logo.png`,
-  TON:  `${CG}/17980/small/ton_symbol.png`,
-  SUI:  `${CG}/26375/small/sui_asset.jpeg`,
-  APT:  `${CG}/26455/small/aptos_round.png`,
-  INJ:  `${CG}/23182/small/injective.jpeg`,
-  SEI:  `${CG}/28205/small/Sei_Logo_-_Transparent.png`,
-  TIA:  `${CG}/31967/small/celestia.jpg`,
+  ARB:  `${CG}/16547/small/arb.jpg`,
+  OP:   `${CG}/25244/small/Optimism.png`,
 }
 
-// Build ordered list of logo URLs to try for a token
-function buildLogoUrls(token: Token, chainName: string): string[] {
-  const urls: string[] = []
-  const symUpper = token.symbol.toUpperCase()
-  const addr = token.address
-  const isNative = addr === NATIVE
-
-  // 1. Symbol override (CoinGecko CDN for well-known tokens) — most reliable
-  if (OVERRIDE_LOGOS[symUpper]) urls.push(OVERRIDE_LOGOS[symUpper])
-
-  // 2. logoURI from the token list (CoinGecko token list or GeckoTerminal image_url)
-  if (token.logoURI && token.logoURI !== '' && !token.logoURI.includes('missing')) {
-    urls.push(token.logoURI)
-  }
-
-  // Skip address-based CDNs for native tokens (address is 0x000...000)
-  if (!isNative && addr && addr.length === 42) {
-    const twSlug = TW_CHAIN_SLUG[chainName]
-
-    // 3. 1inch token logo CDN — covers ETH, BSC, Polygon, Arbitrum, Optimism, Base etc.
-    // Massive coverage: ~100k tokens, just needs lowercase address
-    urls.push(`https://tokens.1inch.io/${addr.toLowerCase()}.png`)
-
-    // 4. TrustWallet by contract address
-    if (twSlug) {
-      urls.push(`${TW_BASE}/${twSlug}/assets/${addr}/logo.png`)
-    }
-
-    // 5. Uniswap assets repo
-    if (twSlug) {
-      urls.push(`${UNI_BASE}/${twSlug}/assets/${addr}/logo.png`)
-    }
-  }
-
-  // Deduplicate while preserving order
-  return [...new Set(urls.filter(Boolean))]
-}
-
-// Native tokens per chain
-const NATIVE_TOKENS: Record<string, Token> = {
-  ETH:       { symbol: 'ETH',  name: 'Ethereum',  address: NATIVE, decimals: 18, logoURI: OVERRIDE_LOGOS.ETH },
-  BSC:       { symbol: 'BNB',  name: 'BNB',       address: NATIVE, decimals: 18, logoURI: OVERRIDE_LOGOS.BNB },
-  POLYGON:   { symbol: 'POL',  name: 'Polygon',   address: NATIVE, decimals: 18, logoURI: OVERRIDE_LOGOS.POL },
-  AVALANCHE: { symbol: 'AVAX', name: 'Avalanche', address: NATIVE, decimals: 18, logoURI: OVERRIDE_LOGOS.AVAX },
-  ARBITRUM:  { symbol: 'ETH',  name: 'Ethereum',  address: NATIVE, decimals: 18, logoURI: OVERRIDE_LOGOS.ETH },
-  OPTIMISM:  { symbol: 'ETH',  name: 'Ethereum',  address: NATIVE, decimals: 18, logoURI: OVERRIDE_LOGOS.ETH },
-  BASE:      { symbol: 'ETH',  name: 'Ethereum',  address: NATIVE, decimals: 18, logoURI: OVERRIDE_LOGOS.ETH },
-  SOLANA:    { symbol: 'SOL',  name: 'Solana',    address: NATIVE, decimals: 9,  logoURI: OVERRIDE_LOGOS.SOL },
-  INK:     { symbol: 'ETH',  name: 'Ether',     address: NATIVE, decimals: 18, logoURI: OVERRIDE_LOGOS.ETH_INK },
-  FANTOM:    { symbol: 'FTM',  name: 'Fantom',    address: NATIVE, decimals: 18, logoURI: OVERRIDE_LOGOS.FTM },
-}
-
-// Returns ordered list of URLs to try for a chain logo
-function chainLogoUrls(chainName: string): string[] {
-  const urls: string[] = []
-  const llamaSlug = LLAMA_SLUG[chainName]
-  if (llamaSlug) urls.push(`${LLAMA}/rsz_${llamaSlug}.jpg`)
-  const twSlug = TW_CHAIN_SLUG[chainName]
-  if (twSlug) urls.push(`${TW_BASE}/${twSlug}/info/logo.png`)
-  return urls
-}
-// Kept for chain selectors that pass src= directly (single URL compat)
-function chainLogoUrl(chainName: string): string {
-  return chainLogoUrls(chainName)[0] ?? ''
-}
-
-// ─── IMAGE WITH MULTI-SOURCE FALLBACK ────────────────────────────────────────
-// Inner component — receives a fixed urls array and tries each in sequence
-function TokenImageInner({ urls, symbol, size }: { urls: string[]; symbol: string; size: number }) {
+// ─── IMAGE WITH FALLBACK ────────────────────────────────────────────────────
+function FallbackImage({ urls, symbol, size }: { urls: string[]; symbol: string; size: number }) {
   const [idx, setIdx] = useState(0)
-
   const avatar = (
     <div className="rounded-full flex items-center justify-center text-white font-bold shrink-0"
       style={{
@@ -234,91 +133,49 @@ function TokenImageInner({ urls, symbol, size }: { urls: string[]; symbol: strin
       {symbol.slice(0, 2).toUpperCase()}
     </div>
   )
-
   if (idx >= urls.length || !urls[idx]) return avatar
-
   return (
     // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src={urls[idx]}
-      alt={symbol}
-      width={size}
-      height={size}
+    <img src={urls[idx]} alt={symbol} width={size} height={size}
       className="rounded-full object-cover shrink-0"
       style={{ width: size, height: size }}
-      onError={() => setIdx(i => i + 1)}
-    />
+      onError={() => setIdx(i => i + 1)} />
   )
 }
 
-// Outer wrapper — uses `key` to force full remount (and idx reset) when token changes
-function TokenImage({
-  token, chainName, src, symbol, size = 28
-}: {
-  token?: Token; chainName?: string; src?: string; symbol: string; size?: number
-}) {
-  const urls = token && chainName ? buildLogoUrls(token, chainName) : src ? [src] : []
-  const stableKey = (token?.address ?? src ?? symbol) + (chainName ?? '')
-  return <TokenImageInner key={stableKey} urls={urls} symbol={symbol} size={size} />
+function TokenImage({ token, size = 28 }: { token: LifiToken; size?: number }) {
+  const sym = token.symbol.toUpperCase()
+  const urls: string[] = []
+  if (OVERRIDE_LOGOS[sym]) urls.push(OVERRIDE_LOGOS[sym])
+  if (token.logoURI) urls.push(token.logoURI)
+  if (token.address !== NATIVE && token.address?.length === 42) {
+    urls.push(`https://tokens.1inch.io/${token.address.toLowerCase()}.png`)
+  }
+  return <FallbackImage key={token.address + (token.chainId ?? '')} urls={[...new Set(urls)]} symbol={token.symbol} size={size} />
 }
 
-// ─── API HELPERS ──────────────────────────────────────────────────────────────
-// Cache for token lists with TTL — avoid re-fetching same chain within session
-const TOKEN_CACHE_TTL = 5 * 60 * 1000  // 5 minutes
-const tokenListCache: Record<string, { tokens: Token[]; ts: number }> = {}
-
-async function loadTokensForChain(chainName: string): Promise<Token[]> {
-  const cached = tokenListCache[chainName]
-  if (cached && Date.now() - cached.ts < TOKEN_CACHE_TTL) return cached.tokens
-
-  const native = NATIVE_TOKENS[chainName]
-  const platform = COINGECKO_PLATFORM[chainName]
-
-  if (!platform) {
-    // Chain not mapped yet — return just native token
-    const result = native ? [native] : []
-    tokenListCache[chainName] = { tokens: result, ts: Date.now() }
-    return result
-  }
-
-  try {
-    const res = await fetch(`/api/token-list?platform=${platform}`)
-    if (!res.ok) throw new Error('failed')
-    const data: { tokens: Token[] } = await res.json()
-
-    // Apply logo overrides for known tokens, add native first
-    const tokens = data.tokens.map(t => ({
-      ...t,
-      logoURI: OVERRIDE_LOGOS[t.symbol.toUpperCase()] ?? t.logoURI,
-    }))
-
-    const result = native ? [native, ...tokens] : tokens
-    tokenListCache[chainName] = { tokens: result, ts: Date.now() }
-    return result
-  } catch {
-    const result = native ? [native] : []
-    tokenListCache[chainName] = { tokens: result, ts: Date.now() }
-    return result
-  }
+function ChainImage({ chain, size = 28 }: { chain: LifiChain; size?: number }) {
+  const urls: string[] = []
+  if (chain.logoURI) urls.push(chain.logoURI)
+  urls.push(`https://icons.llamao.fi/icons/chains/rsz_${chain.key}.jpg`)
+  return <FallbackImage key={String(chain.id)} urls={urls} symbol={chain.name} size={size} />
 }
 
-// Fetch all supported chains from Rubic
-// Module-level cache — list is static per session, no need to re-fetch on navigation
-let cachedChains: Chain[] | null = null
+// ─── LI.FI API HELPERS ──────────────────────────────────────────────────────
+let cachedChains: LifiChain[] | null = null
 
-async function loadChains(): Promise<Chain[]> {
+async function loadChains(): Promise<LifiChain[]> {
   if (cachedChains) return cachedChains
   try {
-    const res = await fetch('https://api-v2.rubic.exchange/api/info/chains?includeTestnets=false')
-    if (!res.ok) throw new Error('failed')
-    const data: Chain[] = await res.json()
-    // Filter to EVM + Solana, exclude testnets, sort by familiarity
-    const priority = ['ETH','BSC','POLYGON','ARBITRUM','OPTIMISM','BASE','AVALANCHE','INK','SOLANA','FANTOM']
-    cachedChains = data
-      .filter(c => !c.name.includes('TEST') && ['EVM','SOLANA','TON','BITCOIN'].includes(c.type))
+    const res = await fetch(`${LIFI_API}/chains?chainTypes=EVM`)
+    if (!res.ok) throw new Error(`${res.status}`)
+    const data: { chains: LifiChain[] } = await res.json()
+    const priority = [57073, 1, 42161, 10, 8453, 137, 56, 43114, 250, 100]
+    cachedChains = data.chains
+      .filter(c => c.id > 0)
       .sort((a, b) => {
-        const ai = priority.indexOf(a.name)
-        const bi = priority.indexOf(b.name)
+        const ai = priority.indexOf(a.id)
+        const bi = priority.indexOf(b.id)
         if (ai !== -1 && bi !== -1) return ai - bi
         if (ai !== -1) return -1
         if (bi !== -1) return 1
@@ -326,87 +183,89 @@ async function loadChains(): Promise<Chain[]> {
       })
     return cachedChains
   } catch {
-    // Fallback to minimal list — do NOT cache fallback so next mount can retry
     return [
-      { id: 1, name: 'ETH', type: 'EVM' },
-      { id: 56, name: 'BSC', type: 'EVM' },
-      { id: 137, name: 'POLYGON', type: 'EVM' },
-      { id: 42161, name: 'ARBITRUM', type: 'EVM' },
-      { id: 10, name: 'OPTIMISM', type: 'EVM' },
-      { id: 8453, name: 'BASE', type: 'EVM' },
-      { id: 43114, name: 'AVALANCHE', type: 'EVM' },
-      { id: 57073, name: 'INK', type: 'EVM' },
+      { id: 57073, key: 'ink', name: 'Ink', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH } },
+      { id: 1, key: 'eth', name: 'Ethereum', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH } },
+      { id: 42161, key: 'arb', name: 'Arbitrum', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH } },
+      { id: 10, key: 'opt', name: 'Optimism', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH } },
+      { id: 8453, key: 'bas', name: 'Base', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH } },
     ]
   }
 }
 
-// Default slippage tolerance per swap type (in %)
-const SLIPPAGE_ON_CHAIN  = 1    // 1% for same-chain DEX swaps
-const SLIPPAGE_CROSS     = 2    // 2% for cross-chain bridges
+const TOKEN_CACHE_TTL = 5 * 60 * 1000
+const tokenListCache: Record<number, { tokens: LifiToken[]; ts: number }> = {}
 
-interface Quote {
-  id: string
-  estimate: {
-    destinationTokenAmount: string   // may be human-readable OR wei — we handle both
-    destinationUsdAmount: number
-    durationInMinutes: number
-    priceImpact: number | null
-  }
-  fees: { gasTokenFees: { protocol: { fixedUsdAmount: number } } }
-  // Rubic v2 uses different field names depending on route type
-  provider?:     string   // on-chain routes
-  type?:         string   // alternative field name
-  providerType?: string   // another alternative
-  tradeType?:    string   // yet another alternative
-}
-
-// ── Shared fee payload — evaluated once at module load ───────────────────────
-const FEE_PARTS = FEE_RECEIVER ? { fee: FEE_PERCENT, feeTarget: FEE_RECEIVER } : {}
-
-// Builds the common fields shared by both quoteBest and swap endpoints
-function buildRubicBody(
-  srcChain: string, srcToken: Token, srcAmount: string,
-  dstChain: string, dstToken: Token,
-) {
-  const isCross = srcChain !== dstChain
-  return {
-    srcTokenAddress: srcToken.address, srcTokenBlockchain: srcChain,
-    srcTokenAmount: srcAmount,
-    dstTokenAddress: dstToken.address, dstTokenBlockchain: dstChain,
-    referrer: REFERRER,
-    ...FEE_PARTS,
-    slippageTolerance: isCross ? SLIPPAGE_CROSS : SLIPPAGE_ON_CHAIN,
+async function loadTokensForChain(chainId: number): Promise<LifiToken[]> {
+  const cached = tokenListCache[chainId]
+  if (cached && Date.now() - cached.ts < TOKEN_CACHE_TTL) return cached.tokens
+  try {
+    const res = await fetch(`${LIFI_API}/tokens?chains=${chainId}`)
+    if (!res.ok) throw new Error(`${res.status}`)
+    const data: { tokens: Record<string, LifiToken[]> } = await res.json()
+    const tokens = data.tokens[String(chainId)] ?? []
+    const result = tokens.map(t => ({
+      ...t,
+      logoURI: OVERRIDE_LOGOS[t.symbol.toUpperCase()] ?? t.logoURI,
+    }))
+    tokenListCache[chainId] = { tokens: result, ts: Date.now() }
+    return result
+  } catch {
+    tokenListCache[chainId] = { tokens: [], ts: Date.now() }
+    return []
   }
 }
 
 async function fetchQuote(
-  srcChain: string, srcToken: Token, srcAmount: string,
-  dstChain: string, dstToken: Token,
-): Promise<Quote> {
-  const res = await fetch('https://api-v2.rubic.exchange/api/routes/quoteBest', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(buildRubicBody(srcChain, srcToken, srcAmount, dstChain, dstToken)),
+  fromChain: LifiChain, fromToken: LifiToken, fromAmountHuman: string,
+  toChain: LifiChain, toToken: LifiToken,
+  fromAddress: string, toAddress?: string,
+): Promise<LifiQuote> {
+  const decimals = fromToken.decimals ?? 18
+  const parsed = parseFloat(fromAmountHuman)
+  if (isNaN(parsed) || parsed <= 0) throw new Error('Invalid amount')
+  const fromAmount = BigInt(Math.floor(parsed * Math.pow(10, decimals))).toString()
+  const isCross = fromChain.id !== toChain.id
+  const slippage = isCross ? SLIPPAGE_CROSS : SLIPPAGE_ON_CHAIN
+
+  const params = new URLSearchParams({
+    fromChain: String(fromChain.id), toChain: String(toChain.id),
+    fromToken: fromToken.address, toToken: toToken.address,
+    fromAmount, fromAddress, slippage: String(slippage), integrator: INTEGRATOR,
   })
-  if (!res.ok) throw new Error(`${res.status}`)
+  if (INTEGRATOR_FEE > 0) params.set('fee', String(INTEGRATOR_FEE))
+  if (toAddress && toAddress !== fromAddress) params.set('toAddress', toAddress)
+
+  const res = await fetch(`${LIFI_API}/quote?${params}`)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.message ?? `${res.status}`)
+  }
   return res.json()
 }
 
-async function fetchSwapTx(
-  srcChain: string, srcToken: Token, srcAmount: string,
-  dstChain: string, dstToken: Token,
-  fromAddress: string, quoteId: string, receiver: string,
-) {
-  const res = await fetch('https://api-v2.rubic.exchange/api/routes/swap', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ...buildRubicBody(srcChain, srcToken, srcAmount, dstChain, dstToken),
-      fromAddress, id: quoteId, receiver,
-    }),
+async function fetchStatus(tool: string, fromChainId: number, toChainId: number, txHash: string) {
+  const params = new URLSearchParams({
+    bridge: tool, fromChain: String(fromChainId), toChain: String(toChainId), txHash,
   })
+  const res = await fetch(`${LIFI_API}/status?${params}`)
   if (!res.ok) throw new Error(`${res.status}`)
-  return res.json() as Promise<{ transaction: { to: string; data: string; value: string; approvalAddress?: string } }>
+  return res.json() as Promise<{
+    status: string
+    substatus?: string
+    receiving?: { txHash: string; chainId: number }
+  }>
+}
+
+// RPC endpoints for balance checking
+const CHAIN_RPC: Record<number, string> = {
+  1: 'https://ethereum-rpc.publicnode.com', 56: 'https://bsc-rpc.publicnode.com',
+  137: 'https://polygon-rpc.com', 42161: 'https://arb1.arbitrum.io/rpc',
+  10: 'https://mainnet.optimism.io', 8453: 'https://mainnet.base.org',
+  43114: 'https://api.avax.network/ext/bc/C/rpc', 57073: 'https://rpc-gel.inkonchain.com',
+  250: 'https://rpc.ftm.tools', 100: 'https://rpc.gnosischain.com',
+  324: 'https://mainnet.era.zksync.io', 59144: 'https://rpc.linea.build',
+  534352: 'https://rpc.scroll.io', 5000: 'https://rpc.mantle.xyz', 81457: 'https://rpc.blast.io',
 }
 
 const ERC20_APPROVE_ABI = [{
@@ -416,15 +275,28 @@ const ERC20_APPROVE_ABI = [{
 }] as const
 
 type TxStatus = 'idle' | 'approving' | 'swapping' | 'pending' | 'success' | 'error'
+const QUOTE_EXPIRY = 60
 
-const QUOTE_EXPIRY = 60  // seconds before a quote is considered stale
+// Default tokens
+const INK_NATIVE: LifiToken = { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, chainId: 57073, logoURI: OVERRIDE_LOGOS.ETH }
+const USDC_INK: LifiToken = {
+  address: '0xF1815bd50389c46847f0Bda824eC8da914045D14', symbol: 'USDC.e',
+  name: 'Bridged USD Coin', decimals: 6, chainId: 57073, logoURI: OVERRIDE_LOGOS.USDC,
+}
+const INK_CHAIN: LifiChain = {
+  id: 57073, key: 'ink', name: 'Ink', chainType: 'EVM', coin: 'ETH', logoURI: '',
+  nativeToken: INK_NATIVE,
+}
 
-// ─── CHAIN SELECTOR MODAL ─────────────────────────────────────────────────────
+// ─── CHAIN SELECTOR MODAL ───────────────────────────────────────────────────
 function ChainModal({ chains, onSelect, onClose }: {
-  chains: Chain[]; onSelect: (c: Chain) => void; onClose: () => void
+  chains: LifiChain[]; onSelect: (c: LifiChain) => void; onClose: () => void
 }) {
   const [q, setQ] = useState('')
-  const filtered = chains.filter(c => c.name.toLowerCase().includes(q.toLowerCase()))
+  const filtered = chains.filter(c =>
+    c.name.toLowerCase().includes(q.toLowerCase()) ||
+    c.key.toLowerCase().includes(q.toLowerCase())
+  )
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden" onClick={e => e.stopPropagation()}>
@@ -442,12 +314,12 @@ function ChainModal({ chains, onSelect, onClose }: {
         </div>
         <div className="overflow-y-auto max-h-72 px-3 pb-4">
           {filtered.map(c => (
-            <button key={c.name} onClick={() => { onSelect(c); onClose() }}
+            <button key={c.id} onClick={() => { onSelect(c); onClose() }}
               className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-violet-50 transition-colors text-left">
-              <TokenImageInner urls={chainLogoUrls(c.name)} symbol={c.name} size={32} />
+              <ChainImage chain={c} size={32} />
               <div>
                 <p className="text-sm font-semibold text-gray-800">{c.name}</p>
-                <p className="text-xs text-gray-400">{c.type}</p>
+                <p className="text-xs text-gray-400">{c.chainType}</p>
               </div>
             </button>
           ))}
@@ -457,23 +329,23 @@ function ChainModal({ chains, onSelect, onClose }: {
   )
 }
 
-// ─── TOKEN SELECTOR MODAL ─────────────────────────────────────────────────────
-function TokenModal({ chainName, onSelect, onClose }: {
-  chainName: string; onSelect: (t: Token) => void; onClose: () => void
+// ─── TOKEN SELECTOR MODAL ───────────────────────────────────────────────────
+function TokenModal({ chain, onSelect, onClose }: {
+  chain: LifiChain; onSelect: (t: LifiToken) => void; onClose: () => void
 }) {
   const [q, setQ] = useState('')
-  const [tokens, setTokens] = useState<Token[]>([])
+  const [tokens, setTokens] = useState<LifiToken[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    loadTokensForChain(chainName).then(t => { setTokens(t); setLoading(false) })
-  }, [chainName])
+    loadTokensForChain(chain.id).then(t => { setTokens(t); setLoading(false) })
+  }, [chain.id])
 
   const filtered = tokens.filter(t =>
     t.symbol.toLowerCase().includes(q.toLowerCase()) ||
     t.name.toLowerCase().includes(q.toLowerCase()) ||
     t.address.toLowerCase() === q.toLowerCase()
-  ).slice(0, 80) // cap for performance
+  ).slice(0, 80)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={onClose}>
@@ -481,7 +353,7 @@ function TokenModal({ chainName, onSelect, onClose }: {
         <div className="flex items-center justify-between px-5 pt-5 pb-3">
           <div>
             <h3 className="font-semibold text-gray-800" style={SORA}>Select Token</h3>
-            <p className="text-xs text-gray-400">{chainName}</p>
+            <p className="text-xs text-gray-400">{chain.name}</p>
           </div>
           <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-100 text-gray-400"><X size={18} /></button>
         </div>
@@ -505,7 +377,7 @@ function TokenModal({ chainName, onSelect, onClose }: {
           {!loading && filtered.map(token => (
             <button key={token.address} onClick={() => { onSelect(token); onClose() }}
               className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-violet-50 transition-colors text-left">
-              <TokenImage token={token} chainName={chainName} symbol={token.symbol} size={36} />
+              <TokenImage token={token} size={36} />
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-gray-800">{token.symbol}</p>
                 <p className="text-xs text-gray-400 truncate">{token.name}</p>
@@ -518,151 +390,50 @@ function TokenModal({ chainName, onSelect, onClose }: {
   )
 }
 
-// ─── MAIN PAGE ────────────────────────────────────────────────────────────────
-// Public RPC endpoints per Rubic chain name (client-side balance fetching)
-// Gas buffer per chain for MAX button (in native token units)
-// Conservative estimate based on typical gas cost at normal gas prices
-const CHAIN_GAS_BUFFER: Record<string, number> = {
-  ETH:       0.003,   // ~$9 @ $3000 ETH — covers complex DEX swaps
-  ARBITRUM:  0.001,   // ~$3 — L2, cheaper
-  OPTIMISM:  0.001,
-  BASE:      0.001,
-  ZKSYNC:    0.001,
-  LINEA:     0.001,
-  SCROLL:    0.001,
-  BLAST:     0.001,
-  MANTLE:    0.5,     // MNT is cheap
-  BSC:       0.003,   // BNB ~$0.90
-  POLYGON:   0.5,     // POL/MATIC is cheap
-  AVALANCHE: 0.01,    // AVAX ~$0.40
-  FANTOM:    1.0,     // FTM is cheap
-  CRONOS:    0.5,
-  GNOSIS:    0.1,
-  CELO:      0.05,
-  MOONBEAM:  0.05,
-  MOONRIVER: 0.05,
-  METIS:     0.005,
-  INK:       0.001,    // ETH on Ink — conservative
-  SOLANA:    0.01,    // SOL — ~$0.002 fees
-}
-
-const CHAIN_RPC: Record<string, string> = {
-  ETH:       'https://ethereum-rpc.publicnode.com',
-  BSC:       'https://bsc-rpc.publicnode.com',
-  POLYGON:   'https://polygon-rpc.com',
-  ARBITRUM:  'https://arb1.arbitrum.io/rpc',
-  OPTIMISM:  'https://mainnet.optimism.io',
-  BASE:      'https://mainnet.base.org',
-  AVALANCHE: 'https://api.avax.network/ext/bc/C/rpc',
-  INK:     'https://rpc-gel.inkonchain.com',
-  FANTOM:    'https://rpc.ftm.tools',
-  GNOSIS:    'https://rpc.gnosischain.com',
-  CELO:      'https://forno.celo.org',
-  LINEA:     'https://rpc.linea.build',
-  SCROLL:    'https://rpc.scroll.io',
-  MANTLE:    'https://rpc.mantle.xyz',
-  BLAST:     'https://rpc.blast.io',
-  ZKSYNC:    'https://mainnet.era.zksync.io',
-  CRONOS:    'https://evm.cronos.org',
-  MOONBEAM:  'https://rpc.api.moonbeam.network',
-  MOONRIVER: 'https://rpc.api.moonriver.moonbeam.network',
-  METIS:     'https://andromeda.metis.io/?owner=1088',
-  KLAYTN:    'https://public-en-baobab.klaytn.net',
-  FUSE:      'https://rpc.fuse.io',
-  KAVA:      'https://evm.kava.io',
-}
-
-// Block explorer tx URL per chain
-const CHAIN_EXPLORER: Record<string, string> = {
-  ETH:       'https://etherscan.io/tx',
-  BSC:       'https://bscscan.com/tx',
-  POLYGON:   'https://polygonscan.com/tx',
-  ARBITRUM:  'https://arbiscan.io/tx',
-  OPTIMISM:  'https://optimistic.etherscan.io/tx',
-  BASE:      'https://basescan.org/tx',
-  AVALANCHE: 'https://snowtrace.io/tx',
-  INK:     'https://explorer.inkonchain.com/tx',
-  SOLANA:    'https://solscan.io/tx',
-  FANTOM:    'https://ftmscan.com/tx',
-  GNOSIS:    'https://gnosisscan.io/tx',
-  LINEA:     'https://lineascan.build/tx',
-  SCROLL:    'https://scrollscan.com/tx',
-  MANTLE:    'https://explorer.mantle.xyz/tx',
-  BLAST:     'https://blastscan.io/tx',
-  ZKSYNC:    'https://explorer.zksync.io/tx',
-  CRONOS:    'https://cronoscan.com/tx',
-  METIS:     'https://andromeda-explorer.metis.io/tx',
-  CELO:      'https://celoscan.io/tx',
-  MOONBEAM:  'https://moonscan.io/tx',
-  MOONRIVER: 'https://moonriver.moonscan.io/tx',
-  FUSE:      'https://explorer.fuse.io/tx',
-  KAVA:      'https://explorer.kava.io/tx',
-}
-
-// Rubic chain name → EVM chain ID (for wagmi chain switching)
-const CHAIN_ID: Record<string, number> = {
-  ETH: 1, BSC: 56, POLYGON: 137, ARBITRUM: 42161, OPTIMISM: 10,
-  BASE: 8453, AVALANCHE: 43114, INK: 57073, FANTOM: 250,
-  GNOSIS: 100, CELO: 42220, LINEA: 59144, SCROLL: 534352,
-  MANTLE: 5000, BLAST: 81457, ZKSYNC: 324, CRONOS: 25,
-  MOONBEAM: 1284, MOONRIVER: 1285, METIS: 1088, FUSE: 122, KAVA: 2222,
-}
-
-const USDC_INK: Token = {
-  symbol: 'USDC.e', name: 'Bridged USD Coin', decimals: 6,
-  address: '0xF1815bd50389c46847f0Bda824eC8da914045D14',
-  logoURI: OVERRIDE_LOGOS.USDC,
-}
-
-const ETH_CHAIN: Chain = { id: 1, name: 'ETH', type: 'EVM' }
-const INK_CHAIN: Chain = { id: 57073, name: 'INK', type: 'EVM' }
-
+// ─── MAIN PAGE ──────────────────────────────────────────────────────────────
 export default function SwapPage() {
   const { address, isConnected } = useWallet()
   const connectedChainId = useChainId()
   const { switchChain } = useSwitchChain()
 
-  const [chains, setChains] = useState<Chain[]>([])
-  const [fromChain, setFromChain] = useState<Chain>(INK_CHAIN)
-  const [toChain,   setToChain]   = useState<Chain>(INK_CHAIN)
-  const [fromToken, setFromToken] = useState<Token>(NATIVE_TOKENS.INK)
-  const [toToken,   setToToken]   = useState<Token>(USDC_INK)
-  const [amount,    setAmount]    = useState('')
-  const [receiver,  setReceiver]  = useState('')
+  const [chains, setChains]       = useState<LifiChain[]>([])
+  const [fromChain, setFromChain] = useState<LifiChain>(INK_CHAIN)
+  const [toChain, setToChain]     = useState<LifiChain>(INK_CHAIN)
+  const [fromToken, setFromToken] = useState<LifiToken>(INK_NATIVE)
+  const [toToken, setToToken]     = useState<LifiToken>(USDC_INK)
+  const [amount, setAmount]       = useState('')
+  const [receiver, setReceiver]   = useState('')
 
-  const [quote,        setQuote]        = useState<Quote | null>(null)
+  const [quote, setQuote]               = useState<LifiQuote | null>(null)
   const [quoteLoading, setQuoteLoading] = useState(false)
-  const [quoteError,   setQuoteError]   = useState<string | null>(null)
+  const [quoteError, setQuoteError]     = useState<string | null>(null)
 
   const [txStatus, setTxStatus] = useState<TxStatus>('idle')
-  const [txHash,   setTxHash]   = useState<string | null>(null)
-  const [txError,  setTxError]  = useState<string | null>(null)
+  const [txHash, setTxHash]     = useState<string | null>(null)
+  const [txError, setTxError]   = useState<string | null>(null)
 
-  const [modal, setModal] = useState<'fromToken' | 'toToken' | 'fromChain' | 'toChain' | null>(null)
-  const [quoteAge,   setQuoteAge]   = useState(0)   // seconds since last quote
+  const [modal, setModal]                 = useState<'fromToken' | 'toToken' | 'fromChain' | 'toChain' | null>(null)
+  const [quoteAge, setQuoteAge]           = useState(0)
   const [receiverError, setReceiverError] = useState<string | null>(null)
 
   const validateReceiver = useCallback((val: string): boolean => {
-    if (!val.trim()) return true  // empty = use sender wallet, always valid
-    // EVM address: 0x + 40 hex chars. Solana: base58 32-44 chars (handled loosely)
-    const isEVM = /^0x[0-9a-fA-F]{40}$/.test(val.trim())
-    const isSol = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(val.trim())
-    const valid = isEVM || (toChain.type === 'SOLANA' ? isSol : false)
+    if (!val.trim()) return true
+    const valid = /^0x[0-9a-fA-F]{40}$/.test(val.trim())
     setReceiverError(valid ? null : 'Invalid address format')
     return valid
-  }, [toChain.type])
+  }, [])
+
   const quoteAgeRef    = useRef<ReturnType<typeof setInterval> | null>(null)
   const pollCleanupRef = useRef<(() => void) | null>(null)
 
-  // ── Token balance via RPC (works for any chain, no wagmi dependency) ────────
+  // ── Balance via RPC ───────────────────────────────────────────────────────
   const [fromBalance, setFromBalance] = useState<number | null>(null)
 
   useEffect(() => {
     setFromBalance(null)
     if (!address || !isConnected) return
-    const rpc = CHAIN_RPC[fromChain.name]
+    const rpc = CHAIN_RPC[fromChain.id]
     if (!rpc) return
-
     const controller = new AbortController()
     const isNative = fromToken.address === NATIVE
 
@@ -678,7 +449,6 @@ export default function SwapPage() {
           const d = await res.json()
           raw = BigInt(d.result ?? '0x0')
         } else {
-          // balanceOf(address) — selector 0x70a08231
           const padded = address!.replace('0x', '').padStart(64, '0')
           const res = await fetch(rpc, {
             method: 'POST', signal: controller.signal,
@@ -691,40 +461,32 @@ export default function SwapPage() {
           const d = await res.json()
           raw = BigInt(d.result && d.result !== '0x' ? d.result : '0x0')
         }
-        const decimals = fromToken.decimals ?? 18
-        setFromBalance(Number(raw) / Math.pow(10, decimals))
-      } catch { /* aborted or network error — leave null */ }
+        setFromBalance(Number(raw) / Math.pow(10, fromToken.decimals ?? 18))
+      } catch { /* aborted */ }
     }
-
     fetchBal()
     return () => controller.abort()
-  }, [address, isConnected, fromChain.name, fromToken.address, fromToken.decimals])
+  }, [address, isConnected, fromChain.id, fromToken.address, fromToken.decimals])
 
   const fromBalanceDisplay = fromBalance !== null
-    ? fromBalance < 0.0001 && fromBalance > 0
-      ? '<0.0001'
+    ? fromBalance < 0.0001 && fromBalance > 0 ? '<0.0001'
       : fromBalance.toLocaleString('en-US', { maximumFractionDigits: 6 })
     : null
 
   function handleMax() {
     if (fromBalance === null) return
-    const isNative = fromToken.address === NATIVE
-    const buffer = isNative ? (CHAIN_GAS_BUFFER[fromChain.name] ?? 0.002) : 0
+    const buffer = fromToken.address === NATIVE ? (GAS_BUFFER[fromChain.id] ?? 0.002) : 0
     const maxAmt = Math.max(0, fromBalance - buffer)
     setAmount(maxAmt > 0 ? maxAmt.toString() : '')
   }
+
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { sendTransactionAsync } = useSendTransaction()
 
-  // Load chain list on mount
   useEffect(() => { loadChains().then(setChains) }, [])
+  useEffect(() => { return () => { pollCleanupRef.current?.() } }, [])
 
-  // Cancel any in-flight status poll when component unmounts
-  useEffect(() => {
-    return () => { pollCleanupRef.current?.() }
-  }, [])
-
-  // Quote age ticker — runs while a quote is active
+  // Quote age ticker
   useEffect(() => {
     if (quote) {
       setQuoteAge(0)
@@ -740,15 +502,17 @@ export default function SwapPage() {
 
   // Quote with debounce
   const getQuote = useCallback(async (amt: string) => {
-    if (!amt || isNaN(Number(amt)) || Number(amt) <= 0) { setQuote(null); return }
+    if (!amt || isNaN(Number(amt)) || Number(amt) <= 0 || !address) { setQuote(null); return }
     setQuoteLoading(true); setQuoteError(null)
     try {
-      setQuote(await fetchQuote(fromChain.name, fromToken, amt, toChain.name, toToken))
-    } catch {
-      setQuoteError('No route found for this pair')
+      const recv = receiver.trim() || undefined
+      setQuote(await fetchQuote(fromChain, fromToken, amt, toChain, toToken, address, recv))
+    } catch (e: any) {
+      setQuoteError(e.message?.includes('No available') || e.message?.includes('not found')
+        ? 'No route found for this pair' : (e.message ?? 'No route found'))
       setQuote(null)
     } finally { setQuoteLoading(false) }
-  }, [fromChain, fromToken, toChain, toToken])
+  }, [fromChain, fromToken, toChain, toToken, address, receiver])
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -762,139 +526,116 @@ export default function SwapPage() {
     setAmount(''); setQuote(null)
   }
 
-  // Fix #6: Parse swap amount into raw bigint for exact ERC-20 approval
-  function parseSwapAmount(amt: string, decimals: number): bigint {
+  function parseApprovalAmount(amt: string, decimals: number): bigint {
     try {
       const parsed = parseFloat(amt)
       if (isNaN(parsed) || parsed <= 0) return 0n
-      // Add 0.5% buffer to handle minor rounding between quote and execution
-      const withBuffer = parsed * 1.005
-      return BigInt(Math.floor(withBuffer * Math.pow(10, decimals)))
+      return BigInt(Math.floor(parsed * 1.005 * Math.pow(10, decimals)))
     } catch { return 0n }
   }
 
-  // Fix #7: Validate the transaction object returned by Rubic before signing.
-  // Checks: (1) `to` is a valid EVM address, (2) `data` starts with 0x,
-  // (3) `value` is not astronomically larger than the expected swap value.
-  function validateRubicTransaction(
-    tx: { to: string; data: string; value?: string; approvalAddress?: string },
-    swapAmount: string,
-    decimals: number,
-  ): boolean {
-    const EVM_ADDR = /^0x[0-9a-fA-F]{40}$/
-    const HEX_DATA = /^0x[0-9a-fA-F]*$/
-
-    if (!EVM_ADDR.test(tx.to))   return false
-    if (!HEX_DATA.test(tx.data)) return false
-
-    // approvalAddress, if present, must also be a valid address
-    if (tx.approvalAddress && !EVM_ADDR.test(tx.approvalAddress)) return false
-
-    // The native value sent must not exceed the swap amount by more than 5x
-    // (accounts for bridge fees, gas topups, etc.)
-    if (tx.value && tx.value !== '0') {
-      try {
-        const valueBig   = BigInt(tx.value)
-        const amountBig  = parseSwapAmount(swapAmount, decimals)
-        const maxAllowed = amountBig * 5n
-        if (amountBig > 0n && valueBig > maxAllowed) return false
-      } catch { return false }
-    }
-
-    return true
-  }
-
+  // ── Execute Swap ──────────────────────────────────────────────────────────
   async function executeSwap() {
-    if (!address || !quote || !amount || quoteExpired) return
+    if (!address || !quote || !amount || quoteExpired || !quote.transactionRequest) return
     if (receiver.trim() && !validateReceiver(receiver)) return
     setTxStatus('idle'); setTxError(null)
+
     try {
-      const recv = receiver.trim() || address
-      // Fetch tx data first (determines if approval is needed) before changing status
-      setTxStatus('swapping')
-      const { transaction } = await fetchSwapTx(
-        fromChain.name, fromToken, amount,
-        toChain.name, toToken,
-        address, quote.id, recv,
-      )
-      if (transaction.approvalAddress && fromToken.address !== NATIVE) {
+      const txReq = quote.transactionRequest
+
+      // Approval if needed
+      if (quote.estimate.approvalAddress && fromToken.address !== NATIVE) {
         setTxStatus('approving')
         await sendTransactionAsync({
           to: fromToken.address as `0x${string}`,
           data: encodeFunctionData({
             abi: ERC20_APPROVE_ABI, functionName: 'approve',
-            // Fix #6 (ALTO): Approve only the exact swap amount + 0.5% buffer,
-            // not MAX_UINT256. This limits exposure if the contract is later exploited.
-            args: [transaction.approvalAddress as `0x${string}`,
-              parseSwapAmount(amount, fromToken.decimals)],
+            args: [quote.estimate.approvalAddress as `0x${string}`, parseApprovalAmount(amount, fromToken.decimals)],
           }),
         })
-        setTxStatus('swapping')
       }
+
+      setTxStatus('swapping')
       const hash = await sendTransactionAsync({
-        to:    transaction.to as `0x${string}`,
-        data:  transaction.data as `0x${string}`,
-        value: transaction.value ? BigInt(transaction.value) : 0n,
+        to:    txReq.to as `0x${string}`,
+        data:  txReq.data as `0x${string}`,
+        value: txReq.value ? BigInt(txReq.value) : 0n,
       })
-      setTxHash(hash); setTxStatus('pending')
-      let attempts = 0
-      let pollTimer: ReturnType<typeof setTimeout> | null = null
-      let cancelled = false
-      const stopPoll = () => { cancelled = true; if (pollTimer) clearTimeout(pollTimer) }
-      pollCleanupRef.current = stopPoll
-      const poll = async () => {
-        if (cancelled) return
-        try {
-          const r = await fetch(`https://api-v2.rubic.exchange/api/info/status?srcTxHash=${hash}`)
-          const d = await r.json()
-          if (d.status === 'SUCCESS') { setTxStatus('success'); return }
-          if (['FAIL','REVERT','REVERTED'].includes(d.status)) {
-            setTxStatus('error'); setTxError('Transaction reverted on-chain'); return
-          }
-        } catch {}
-        if (!cancelled && attempts++ < 40) pollTimer = setTimeout(poll, 5000)
+
+      setTxHash(hash)
+      setTxStatus('pending')
+
+      // Cross-chain: poll LI.FI status
+      if (fromChain.id !== toChain.id) {
+        let attempts = 0
+        let pollTimer: ReturnType<typeof setTimeout> | null = null
+        let cancelled = false
+        const stopPoll = () => { cancelled = true; if (pollTimer) clearTimeout(pollTimer) }
+        pollCleanupRef.current = stopPoll
+        const poll = async () => {
+          if (cancelled) return
+          try {
+            const s = await fetchStatus(quote.tool, fromChain.id, toChain.id, hash)
+            if (s.status === 'DONE') { setTxStatus('success'); return }
+            if (s.status === 'FAILED') { setTxStatus('error'); setTxError('Transaction failed on destination chain'); return }
+          } catch { /* retry */ }
+          if (!cancelled && attempts++ < 60) pollTimer = setTimeout(poll, 5000)
+        }
+        poll()
+      } else {
+        setTxStatus('success')
       }
-      poll()
     } catch (e: any) {
       setTxError(e.shortMessage ?? e.message ?? 'Transaction failed')
       setTxStatus('error')
     }
   }
 
+  // ── Derived values ────────────────────────────────────────────────────────
   const dstAmount = useMemo(() => {
     if (!quote) return ''
-    const raw = Number(quote.estimate.destinationTokenAmount)
-    if (isNaN(raw) || raw === 0) return '0'
-    const decimals = toToken.decimals ?? 18
-    // Use BigInt for wei values to avoid JS Number precision loss (> 2^53)
-    // Detect wei: if string has no decimal point AND integer value > 10^(dec-8)
-    const rawStr = String(quote.estimate.destinationTokenAmount).trim()
-    const isWei = !rawStr.includes('.') && raw > Math.pow(10, Math.max(0, decimals - 8))
-    let human: number
-    if (isWei) {
-      // Safe BigInt division preserving up to 8 significant decimal places
-      const bigRaw  = BigInt(rawStr)
-      const bigDiv  = BigInt(10 ** Math.max(0, decimals - 8))
-      const shifted = Number(bigRaw / bigDiv)
-      human = shifted / 1e8
-    } else {
-      human = raw
-    }
-    // Format nicely: fewer decimals for large values, more for small
-    if (human >= 1000)  return human.toLocaleString('en-US', { maximumFractionDigits: 2 })
-    if (human >= 1)     return human.toFixed(4)
-    if (human >= 0.001) return human.toFixed(6)
-    return human.toExponential(4)
+    try {
+      const big = BigInt(quote.estimate.toAmount)
+      const dec = toToken.decimals ?? 18
+      const divisor = BigInt(10 ** Math.max(0, dec - 8))
+      const human = Number(big / divisor) / 1e8
+      if (human >= 1000)  return human.toLocaleString('en-US', { maximumFractionDigits: 2 })
+      if (human >= 1)     return human.toFixed(4)
+      if (human >= 0.001) return human.toFixed(6)
+      return human.toExponential(4)
+    } catch { return '0' }
   }, [quote, toToken.decimals])
-  const isCrossChain   = fromChain.name !== toChain.name
-  const expectedChainId = CHAIN_ID[fromChain.name]
-  const wrongChain = isConnected && !!expectedChainId && connectedChainId !== expectedChainId
-  const canSwap = isConnected && !!quote && !quoteExpired && !!amount && txStatus === 'idle' && !wrongChain
 
+  const dstAmountUsd = quote?.estimate.toAmountUSD
+    ? `$${parseFloat(quote.estimate.toAmountUSD).toFixed(2)}` : null
+
+  const isCrossChain = fromChain.id !== toChain.id
+  const wrongChain   = isConnected && connectedChainId !== fromChain.id
+  const canSwap      = isConnected && !!quote && !quoteExpired && !!amount && txStatus === 'idle' && !wrongChain
+
+  const explorerTxUrl = useMemo(() => {
+    if (!txHash) return null
+    const base = fromChain.metamask?.blockExplorerUrls?.[0]
+    return base ? `${base.replace(/\/$/, '')}/tx/${txHash}` : `https://explorer.inkonchain.com/tx/${txHash}`
+  }, [fromChain, txHash])
+
+  const routeDisplay = quote?.toolDetails?.name ?? quote?.tool ?? '—'
+
+  const totalFeesUsd = useMemo(() => {
+    if (!quote) return null
+    let total = 0
+    for (const gc of quote.estimate.gasCosts ?? []) total += parseFloat(gc.amountUSD || '0')
+    for (const fc of quote.estimate.feeCosts ?? []) total += parseFloat(fc.amountUSD || '0')
+    return total > 0 ? total.toFixed(2) : null
+  }, [quote])
+
+  const estimatedTime = quote?.estimate.executionDuration
+    ? Math.max(1, Math.round(quote.estimate.executionDuration / 60)) : null
+
+  // ── RENDER ────────────────────────────────────────────────────────────────
   return (
     <div className="max-w-2xl mx-auto px-4 py-6">
 
-      {/* Header */}
       <div className="mb-6">
         <div className="flex items-center gap-3 mb-1">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-500 to-purple-700 flex items-center justify-center shadow-lg shadow-violet-200">
@@ -903,7 +644,7 @@ export default function SwapPage() {
           <h1 className="font-bold text-2xl text-gray-900" style={SORA}>Cross-chain Swap</h1>
         </div>
         <p className="text-sm text-gray-500 ml-12">
-          Cross-chain swaps across {chains.length > 0 ? `${chains.length}+` : '70+'} chains · Best rate from 360+ DEXes &amp; bridges
+          Cross-chain swaps across {chains.length > 0 ? `${chains.length}+` : '40+'} chains · Best rate via LI.FI aggregation
         </p>
       </div>
 
@@ -915,7 +656,7 @@ export default function SwapPage() {
             <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">From</span>
             <button onClick={() => setModal('fromChain')}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-gray-200 hover:border-violet-300 hover:bg-violet-50 transition-colors text-xs font-medium text-gray-700">
-              <TokenImageInner urls={chainLogoUrls(fromChain.name)} symbol={fromChain.name} size={16} />
+              <ChainImage chain={fromChain} size={16} />
               {fromChain.name}
               <ChevronDown size={11} className="text-gray-400" />
             </button>
@@ -923,26 +664,21 @@ export default function SwapPage() {
           <div className="flex items-center gap-3">
             <button onClick={() => setModal('fromToken')}
               className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white border border-gray-200 hover:border-violet-300 hover:bg-violet-50 transition-colors shrink-0">
-              <TokenImage token={fromToken} chainName={fromChain.name} symbol={fromToken.symbol} size={24} />
+              <TokenImage token={fromToken} size={24} />
               <span className="font-semibold text-gray-800 text-sm">{fromToken.symbol}</span>
               <ChevronDown size={13} className="text-gray-400" />
             </button>
             <div className="flex-1 flex flex-col items-end gap-1 min-w-0">
               <input type="number" min="0" placeholder="0.00" value={amount}
-                onChange={e => {
-                  const v = e.target.value
-                  if (v === '' || Number(v) > 0) setAmount(v)
-                }}
+                onChange={e => { const v = e.target.value; if (v === '' || Number(v) > 0) setAmount(v) }}
                 className="w-full bg-transparent text-right text-2xl font-semibold text-gray-800 outline-none placeholder-gray-300" />
               {isConnected && fromBalanceDisplay !== null && (
                 <div className="flex items-center gap-1.5">
                   <span className="text-xs text-gray-400">
                     Balance: <span className="text-gray-500 font-medium">{fromBalanceDisplay} {fromToken.symbol}</span>
                   </span>
-                  <button
-                    onClick={handleMax}
-                    className="text-xs font-semibold text-violet-500 hover:text-violet-700 bg-violet-50 hover:bg-violet-100 px-1.5 py-0.5 rounded transition-colors"
-                  >
+                  <button onClick={handleMax}
+                    className="text-xs font-semibold text-violet-500 hover:text-violet-700 bg-violet-50 hover:bg-violet-100 px-1.5 py-0.5 rounded transition-colors">
                     MAX
                   </button>
                 </div>
@@ -965,7 +701,7 @@ export default function SwapPage() {
             <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">To</span>
             <button onClick={() => setModal('toChain')}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-gray-200 hover:border-violet-300 hover:bg-violet-50 transition-colors text-xs font-medium text-gray-700">
-              <TokenImageInner urls={chainLogoUrls(toChain.name)} symbol={toChain.name} size={16} />
+              <ChainImage chain={toChain} size={16} />
               {toChain.name}
               <ChevronDown size={11} className="text-gray-400" />
             </button>
@@ -973,7 +709,7 @@ export default function SwapPage() {
           <div className="flex items-center gap-3">
             <button onClick={() => setModal('toToken')}
               className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white border border-gray-200 hover:border-violet-300 hover:bg-violet-50 transition-colors shrink-0">
-              <TokenImage token={toToken} chainName={toChain.name} symbol={toToken.symbol} size={24} />
+              <TokenImage token={toToken} size={24} />
               <span className="font-semibold text-gray-800 text-sm">{toToken.symbol}</span>
               <ChevronDown size={13} className="text-gray-400" />
             </button>
@@ -986,7 +722,7 @@ export default function SwapPage() {
               ) : dstAmount ? (
                 <>
                   <span className="text-2xl font-semibold text-gray-800">{dstAmount}</span>
-                  {quote && <p className="text-xs text-gray-400 mt-0.5">≈ ${quote.estimate.destinationUsdAmount.toFixed(2)}</p>}
+                  {dstAmountUsd && <p className="text-xs text-gray-400 mt-0.5">≈ {dstAmountUsd}</p>}
                 </>
               ) : (
                 <span className="text-2xl font-semibold text-gray-300">0.00</span>
@@ -995,7 +731,7 @@ export default function SwapPage() {
           </div>
         </div>
 
-        {/* Receiver (cross-chain) */}
+        {/* Receiver */}
         {isCrossChain && (
           <div className="rounded-xl bg-gray-50 border border-gray-100 p-3">
             <label className="text-xs font-medium text-gray-400 uppercase tracking-wide block mb-1.5">
@@ -1016,8 +752,7 @@ export default function SwapPage() {
             {quoteExpired && (
               <div className="flex items-center justify-between px-4 py-2.5">
                 <span className="text-amber-600 font-medium text-xs">Quote expired — refresh before swapping</span>
-                <button
-                  onClick={() => getQuote(amount)}
+                <button onClick={() => getQuote(amount)}
                   className="flex items-center gap-1 text-xs font-semibold text-violet-600 hover:text-violet-800 bg-white border border-violet-200 px-2 py-1 rounded-lg transition-colors">
                   <RefreshCw size={11} /> Refresh
                 </button>
@@ -1029,41 +764,29 @@ export default function SwapPage() {
                 <span className={`text-xs font-medium ${quoteAge > 45 ? 'text-amber-500' : 'text-gray-500'}`}>{Math.max(0, 60 - quoteAge)}s</span>
               </div>
             )}
-            {quote.estimate.durationInMinutes && (
+            {estimatedTime && (
               <div className="flex justify-between px-4 py-2.5">
                 <span className="text-gray-500">Estimated time</span>
-                <span className="font-medium text-gray-700">~{quote.estimate.durationInMinutes} min</span>
+                <span className="font-medium text-gray-700">~{estimatedTime} min</span>
               </div>
             )}
-            {quote.estimate.priceImpact !== null && (
+            {totalFeesUsd && (
               <div className="flex justify-between px-4 py-2.5">
-                <span className="text-gray-500">Price impact</span>
-                <span className={`font-medium ${Math.abs(quote.estimate.priceImpact) > 3 ? 'text-red-500' : 'text-gray-700'}`}>
-                  {quote.estimate.priceImpact.toFixed(2)}%
-                </span>
-              </div>
-            )}
-            {isCrossChain && (quote.fees?.gasTokenFees?.protocol?.fixedUsdAmount ?? 0) > 0 && (
-              <div className="flex justify-between px-4 py-2.5">
-                <span className="text-gray-500">Protocol fee</span>
-                <span className="font-medium text-gray-700">${quote.fees.gasTokenFees.protocol.fixedUsdAmount.toFixed(2)}</span>
+                <span className="text-gray-500">Estimated fees</span>
+                <span className="font-medium text-gray-700">${totalFeesUsd}</span>
               </div>
             )}
             <div className="flex justify-between px-4 py-2.5">
               <span className="text-gray-500">Slippage tolerance</span>
-              <span className="font-medium text-gray-700">{isCrossChain ? SLIPPAGE_CROSS : SLIPPAGE_ON_CHAIN}%</span>
+              <span className="font-medium text-gray-700">{(isCrossChain ? SLIPPAGE_CROSS : SLIPPAGE_ON_CHAIN) * 100}%</span>
             </div>
             <div className="flex justify-between px-4 py-2.5">
               <span className="text-gray-500">Route</span>
-              <span className="font-medium text-violet-600 capitalize">
-                {(quote.provider ?? quote.type ?? quote.providerType ?? quote.tradeType ?? '—')
-                  .replace(/_/g, ' ').replace(/-/g, ' ').toLowerCase()}
-              </span>
+              <span className="font-medium text-violet-600">{routeDisplay}</span>
             </div>
           </div>
         )}
 
-        {/* Quote error */}
         {quoteError && (
           <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-red-50 border border-red-100 text-sm text-red-500">
             <XCircle size={14} /> {quoteError}
@@ -1074,8 +797,7 @@ export default function SwapPage() {
         {!isConnected ? (
           <div className="text-center py-2"><p className="text-sm text-gray-400">Connect your wallet to swap</p></div>
         ) : wrongChain ? (
-          <button
-            onClick={() => expectedChainId && switchChain({ chainId: expectedChainId })}
+          <button onClick={() => switchChain({ chainId: fromChain.id })}
             className="w-full py-3.5 rounded-xl font-semibold text-white transition-all duration-200 flex items-center justify-center gap-2"
             style={{ background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)', boxShadow: '0 4px 16px rgba(245,158,11,0.35)' }}>
             Switch to {fromChain.name} network
@@ -1085,11 +807,10 @@ export default function SwapPage() {
             <div className="flex items-center gap-2 text-emerald-600 font-medium">
               <CheckCircle size={18} /> Swap successful!
             </div>
-            {txHash && (
-              <a href={`${CHAIN_EXPLORER[fromChain.name] ?? 'https://explorer.inkonchain.com/tx'}/${txHash}`}
-                target="_blank" rel="noopener noreferrer"
+            {explorerTxUrl && (
+              <a href={explorerTxUrl} target="_blank" rel="noopener noreferrer"
                 className="text-xs text-violet-500 hover:text-violet-700 flex items-center gap-1">
-                View on {fromChain.name} explorer <ExternalLink size={11} />
+                View on explorer <ExternalLink size={11} />
               </a>
             )}
             <button onClick={() => { setTxStatus('idle'); setTxHash(null); setAmount(''); setQuote(null) }}
@@ -1125,31 +846,23 @@ export default function SwapPage() {
         <Info size={13} className="mt-0.5 shrink-0" />
         <span>
           Swaps execute directly on-chain via{' '}
-          <a href="https://rubic.exchange" target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:text-violet-600">Rubic</a>
-          {' '}— InkBoard never holds your funds.
+          <a href="https://li.fi" target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:text-violet-600">LI.FI</a>
+          {' '}aggregation — InkBoard never holds your funds.
         </span>
       </div>
 
       {/* Modals */}
       {modal === 'fromChain' && (
-        <ChainModal chains={chains} onSelect={c => {
-          setFromChain(c)
-          setFromToken(NATIVE_TOKENS[c.name] ?? { symbol: c.name, name: c.name, address: NATIVE, decimals: 18, logoURI: chainLogoUrl(c.name) })
-          setQuote(null)
-        }} onClose={() => setModal(null)} />
+        <ChainModal chains={chains} onSelect={c => { setFromChain(c); setFromToken(c.nativeToken); setQuote(null) }} onClose={() => setModal(null)} />
       )}
       {modal === 'toChain' && (
-        <ChainModal chains={chains} onSelect={c => {
-          setToChain(c)
-          setToToken(NATIVE_TOKENS[c.name] ?? { symbol: c.name, name: c.name, address: NATIVE, decimals: 18, logoURI: chainLogoUrl(c.name) })
-          setQuote(null)
-        }} onClose={() => setModal(null)} />
+        <ChainModal chains={chains} onSelect={c => { setToChain(c); setToToken(c.nativeToken); setQuote(null) }} onClose={() => setModal(null)} />
       )}
       {modal === 'fromToken' && (
-        <TokenModal chainName={fromChain.name} onSelect={t => { setFromToken(t); setQuote(null) }} onClose={() => setModal(null)} />
+        <TokenModal chain={fromChain} onSelect={t => { setFromToken(t); setQuote(null) }} onClose={() => setModal(null)} />
       )}
       {modal === 'toToken' && (
-        <TokenModal chainName={toChain.name} onSelect={t => { setToToken(t); setQuote(null) }} onClose={() => setModal(null)} />
+        <TokenModal chain={toChain} onSelect={t => { setToToken(t); setQuote(null) }} onClose={() => setModal(null)} />
       )}
     </div>
   )
