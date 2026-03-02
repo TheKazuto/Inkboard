@@ -95,7 +95,7 @@ async function scanInkApprovals(
     if (data.status === '1' && Array.isArray(data.result)) return data.result
     if (data.message === 'No records found') return []
     if (data.status === '0') { console.warn('[approvals]', data.message); return [] }
-    throw new Error(data.message ?? 'Etherscan fetch failed')
+    throw new Error(data.message ?? 'Explorer fetch failed')
   }
 
   onProgress('Fetching approval history from Ink explorer…')
