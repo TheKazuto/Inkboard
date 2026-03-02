@@ -94,10 +94,25 @@ const SLIPPAGE_ON_CHAIN = 0.01
 const SLIPPAGE_CROSS    = 0.02
 
 // ─── GAS BUFFER for MAX button ──────────────────────────────────────────────
+// Conservative estimate of gas cost for a swap, in native token units.
+// L2s have very cheap gas — buffer should be minimal.
 const GAS_BUFFER: Record<number, number> = {
-  1: 0.003, 10: 0.001, 56: 0.003, 137: 0.5, 8453: 0.001,
-  42161: 0.001, 43114: 0.01, 57073: 0.001, 250: 1.0, 100: 0.1,
-  324: 0.001, 59144: 0.001, 534352: 0.001, 5000: 0.5, 81457: 0.001,
+  1: 0.003,       // ETH mainnet — expensive
+  56: 0.003,      // BSC
+  137: 0.5,       // Polygon POL
+  43114: 0.01,    // Avalanche
+  250: 1.0,       // Fantom
+  100: 0.1,       // Gnosis
+  5000: 0.5,      // Mantle
+  // L2s — very cheap gas, minimal buffer
+  10: 0.0001,     // Optimism
+  8453: 0.0001,   // Base
+  42161: 0.0001,  // Arbitrum
+  57073: 0.0001,  // Ink
+  324: 0.0001,    // zkSync
+  59144: 0.0001,  // Linea
+  534352: 0.0001, // Scroll
+  81457: 0.0001,  // Blast
 }
 
 // ─── WELL-KNOWN LOGO OVERRIDES ──────────────────────────────────────────────
@@ -507,13 +522,15 @@ export default function SwapPage() {
   }, [address, isConnected, fromChain, fromToken.address, fromToken.decimals])
 
   // Convert BigInt wei string → human-readable string with full precision
-  function weiToHuman(weiStr: string, decimals: number): string {
+  // Caps fractional digits to maxFrac (default 8) for clean display
+  function weiToHuman(weiStr: string, decimals: number, maxFrac = 8): string {
     if (weiStr === '0') return '0'
     const padded = weiStr.padStart(decimals + 1, '0')
     const intPart = padded.slice(0, padded.length - decimals) || '0'
     const fracPart = padded.slice(padded.length - decimals)
-    // Trim trailing zeros from fraction
-    const trimmed = fracPart.replace(/0+$/, '')
+    // Cap to maxFrac digits, then trim trailing zeros
+    const capped = fracPart.slice(0, maxFrac)
+    const trimmed = capped.replace(/0+$/, '')
     return trimmed ? `${intPart}.${trimmed}` : intPart
   }
 
