@@ -120,7 +120,7 @@ function TokenRow({ token }: { token: TokenData }) {
 function NFTCard({ nft }: { nft: NFTData }) {
   const [imgErr, setImgErr] = useState(false)
   return (
-    <a href={nft.magicEdenUrl} target="_blank" rel="noopener noreferrer"
+    <a href={nft.openSeaUrl} target="_blank" rel="noopener noreferrer"
       className="border border-violet-100 rounded-xl overflow-hidden hover:border-violet-300 hover:shadow-md transition-all group block">
       <div className="aspect-square bg-gradient-to-br from-violet-100 to-purple-200 flex items-center justify-center overflow-hidden">
         {nft.image && !imgErr
@@ -156,7 +156,7 @@ function NFTCard({ nft }: { nft: NFTData }) {
 function NFTListRow({ nft }: { nft: NFTData }) {
   const [imgErr, setImgErr] = useState(false)
   return (
-    <a href={nft.magicEdenUrl} target="_blank" rel="noopener noreferrer"
+    <a href={nft.openSeaUrl} target="_blank" rel="noopener noreferrer"
       className="flex items-center gap-4 px-5 py-3.5 border-b border-gray-50 hover:bg-violet-50/40 transition-all group">
       <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-100 to-purple-200 flex items-center justify-center overflow-hidden shrink-0">
         {nft.image && !imgErr
@@ -405,12 +405,12 @@ export default function PortfolioPage() {
                   <div className="w-10 h-10 rounded-full bg-amber-50 flex items-center justify-center">
                     <span className="text-amber-400 text-lg">🔑</span>
                   </div>
-                  <p className="text-sm font-medium text-gray-600">Etherscan API key required</p>
+                  <p className="text-sm font-medium text-gray-600">OpenSea API key recommended</p>
                   <p className="text-xs text-gray-400 max-w-xs">
-                    Add <code className="bg-gray-100 px-1 rounded text-violet-600 font-mono">ETHERSCAN_API_KEY</code> to your Vercel environment variables to enable NFT detection.
+                    Add <code className="bg-gray-100 px-1 rounded text-violet-600 font-mono">OPENSEA_API_KEY</code> to your Vercel environment variables for better NFT images and floor prices.
                   </p>
-                  <a href="https://etherscan.io/apis" target="_blank" rel="noopener noreferrer"
-                    className="text-xs text-violet-500 hover:text-violet-700 underline">Get a free key →</a>
+                  <a href="https://docs.opensea.io/reference/api-keys" target="_blank" rel="noopener noreferrer"
+                    className="text-xs text-violet-500 hover:text-violet-700 underline">Request API key →</a>
                 </div>
               )}
               {!isLoading && !nftsNoKey && nfts.length === 0 && (
@@ -432,8 +432,8 @@ export default function PortfolioPage() {
               {nftTotal > 50 && (
                 <p className="text-xs text-gray-400 text-center mt-4 pt-4 border-t border-gray-50">
                   Showing 50 of {nftTotal} NFTs ·{' '}
-                  <a href={`https://magiceden.io/wallet/${address}?chain=ink`} target="_blank" rel="noopener noreferrer"
-                    className="text-violet-500 hover:text-violet-700">View all on Magic Eden</a>
+                  <a href={`https://opensea.io/${address}`} target="_blank" rel="noopener noreferrer"
+                    className="text-violet-500 hover:text-violet-700">View all on OpenSea</a>
                 </p>
               )}
             </div>

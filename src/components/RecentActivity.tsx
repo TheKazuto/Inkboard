@@ -111,14 +111,12 @@ export default function RecentActivity() {
       {isConnected && status === 'no_api_key' && (
         <div className="flex flex-col items-center justify-center py-6 text-center gap-2">
           <div className="w-10 h-10 rounded-full bg-amber-50 flex items-center justify-center mb-1">
-            <span className="text-amber-400 text-lg">🔑</span>
+            <span className="text-amber-400 text-lg">⏳</span>
           </div>
-          <p className="text-sm font-medium text-gray-600">API Key required</p>
+          <p className="text-sm font-medium text-gray-600">Loading transactions...</p>
           <p className="text-xs text-gray-400 max-w-[200px]">
-            Add <code className="bg-gray-100 px-1 rounded text-violet-600">ETHERSCAN_API_KEY</code> in Vercel environment variables
+            Fetching your recent activity from Ink explorer
           </p>
-          <a href="https://etherscan.io/apis" target="_blank" rel="noopener noreferrer"
-            className="text-xs text-violet-500 hover:text-violet-700 underline mt-1">Get free key →</a>
         </div>
       )}
 

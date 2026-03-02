@@ -235,16 +235,14 @@ export default function TransactionsPage() {
             {isConnected && status === 'no_api_key' && (
               <div className="flex flex-col items-center justify-center py-12 text-center gap-3 px-6">
                 <div className="w-12 h-12 rounded-full bg-amber-50 flex items-center justify-center">
-                  <span className="text-amber-400 text-2xl">🔑</span>
+                  <span className="text-amber-400 text-2xl">⏳</span>
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-gray-700 mb-1">API Key Required</p>
+                  <p className="text-sm font-semibold text-gray-700 mb-1">Loading Transactions</p>
                   <p className="text-xs text-gray-400 max-w-xs">
-                    Add <code className="bg-gray-100 px-1 rounded text-violet-600">ETHERSCAN_API_KEY</code> to your Vercel environment variables to enable transaction history.
+                    Fetching your recent activity from Ink explorer...
                   </p>
                 </div>
-                <a href="https://etherscan.io/apis" target="_blank" rel="noopener noreferrer"
-                  className="text-sm text-violet-600 hover:text-violet-800 font-medium underline">Get free API key →</a>
               </div>
             )}
 

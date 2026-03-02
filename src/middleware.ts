@@ -17,7 +17,7 @@ const WINDOW_MS = 60_000  // 1-minute sliding window
 // Per-route limits (requests per window per IP)
 const ROUTE_LIMITS: Record<string, number> = {
   '/api/approvals-logs': 10,  // Etherscan paid API — strict
-  '/api/nfts':           10,  // Etherscan + Magic Eden — strict
+  '/api/nfts':           10,  // OpenSea + Blockscout — strict
   '/api/defi':           15,  // many RPC calls per request
   '/api/best-aprs':      12,  // calls many external APIs
   '/api/transactions':   20,

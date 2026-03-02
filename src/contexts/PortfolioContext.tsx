@@ -29,7 +29,7 @@ export interface NFTData {
   id: string; contract: string; tokenId: string
   collection: string; symbol: string; name: string
   image: string | null; floorETH: number; floorUSD: number
-  magicEdenUrl: string
+  openSeaUrl: string
 }
 
 export interface PortfolioTotals {

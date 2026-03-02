@@ -4,18 +4,14 @@ import { INK_RPC as RPC, rpcBatch, getEthPrice } from '@/lib/ink'
 export const revalidate = 0
 
 // ─── Security: SSRF protection for metadata fetching ─────────────────────────
-// Block fetches to private/internal IP ranges and non-HTTPS protocols.
-// A strict host allowlist was too restrictive (NFTs use hundreds of CDNs).
-// These two checks cover the actual attack surface.
-
 const PRIVATE_IP_RE = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.|::1|fc00:|fd)/
 
 function isSafeMetaUrl(url: string): boolean {
   if (!url) return false
   try {
     const u = new URL(url)
-    if (u.protocol !== 'https:') return false           // HTTPS only — blocks file:, data:, javascript:, http:
-    if (PRIVATE_IP_RE.test(u.hostname)) return false    // block internal IPs
+    if (u.protocol !== 'https:') return false
+    if (PRIVATE_IP_RE.test(u.hostname)) return false
     if (u.hostname === 'localhost' || u.hostname.endsWith('.local')) return false
     return true
   } catch { return false }
@@ -36,48 +32,112 @@ function resolveURI(uri: string): string {
   if (!uri) return ''
   return uri.startsWith('ipfs://') ? uri.replace('ipfs://', 'https://ipfs.io/ipfs/') : uri
 }
-
-// Security: sanitize image URL before sending to client (fix #13)
-// Only allow HTTPS URLs — blocks javascript:, data:, file:, http:
 function sanitizeImage(raw: string | null | undefined): string | null {
   if (!raw) return null
   const resolved = resolveURI(String(raw))
   return isSafeMetaUrl(resolved) ? resolved : null
 }
 
-// ─── Step 1 ───────────────────────────────────────────────────────────────────
-async function discoverNFTs(address: string, apiKey: string) {
-  // Security fix #5: use URL object so the API key is set via searchParams,
-  // not interpolated into a template string (avoids accidental log exposure).
-  const url = new URL('https://api.etherscan.io/v2/api')
-  url.searchParams.set('chainid', '57073')
-  url.searchParams.set('module',  'account')
-  url.searchParams.set('action',  'tokennfttx')
-  url.searchParams.set('address', address)
-  url.searchParams.set('page',    '1')
-  url.searchParams.set('offset',  '100')
-  url.searchParams.set('sort',    'desc')
-  url.searchParams.set('apikey',  apiKey)
+// ─── OpenSea API ─────────────────────────────────────────────────────────────
+const OPENSEA_API = 'https://api.opensea.io/api/v2'
+const OPENSEA_CHAIN = 'ink'
 
-  const res  = await fetch(url.toString(), { cache: 'no-store', signal: AbortSignal.timeout(12_000) })
+// PATH 1: OpenSea — Get NFTs by account (returns metadata, images, collection)
+async function fetchNFTsViaOpenSea(address: string, apiKey: string, ethPrice: number) {
+  const url = `${OPENSEA_API}/chain/${OPENSEA_CHAIN}/account/${address}/nfts?limit=50`
+  const res = await fetch(url, {
+    headers: { 'Accept': 'application/json', 'X-API-KEY': apiKey },
+    signal: AbortSignal.timeout(15_000),
+    cache: 'no-store',
+  })
+  if (!res.ok) throw new Error(`OpenSea ${res.status}: ${res.statusText}`)
   const data = await res.json()
-  if (data.status !== '1') {
-    if (data.message?.includes('No transactions') || data.message?.includes('No records')) return []
-    throw new Error(`Etherscan: ${data.message}`)
-  }
-  const addrLower = address.toLowerCase()
-  const lastTx    = new Map<string, any>()
-  for (const tx of data.result as any[]) {
-    const key = `${tx.contractAddress.toLowerCase()}_${BigInt(tx.tokenID)}`
-    if (!lastTx.has(key)) lastTx.set(key, tx)
-  }
-  return [...lastTx.values()]
-    .filter(tx => tx.to?.toLowerCase() === addrLower)
-    .map(tx => ({ contract: tx.contractAddress.toLowerCase(), tokenId: BigInt(tx.tokenID) }))
+  const items: any[] = data.nfts ?? []
+  if (!items.length) return { nfts: [], nftValue: 0, total: 0 }
+
+  // Collect unique collection slugs for floor prices
+  const slugs = [...new Set(items.map((n: any) => n.collection).filter(Boolean))] as string[]
+  const floorMap = await fetchOpenSeaFloorPrices(slugs, apiKey)
+
+  const nfts = items.map((nft: any) => {
+    const contract  = nft.contract?.toLowerCase() ?? ''
+    const tokenId   = nft.identifier ?? ''
+    const slug      = nft.collection ?? ''
+    const floorETH  = floorMap[slug] ?? 0
+    const floorUSD  = floorETH * ethPrice
+
+    return {
+      id:          `${contract}_${tokenId}`,
+      contract,
+      tokenId,
+      collection:  nft.collection ?? nft.name ?? `${contract.slice(0, 6)}...${contract.slice(-4)}`,
+      symbol:      '',
+      name:        nft.name ?? `#${tokenId}`,
+      image:       sanitizeImage(nft.image_url ?? nft.display_image_url),
+      floorETH,
+      floorUSD,
+      openSeaUrl:  `https://opensea.io/assets/${OPENSEA_CHAIN}/${contract}/${tokenId}`,
+    }
+  })
+
+  const nftValue = nfts.reduce((s: number, n: any) => s + n.floorUSD, 0)
+  return { nfts, nftValue, total: items.length }
 }
 
-// ─── Step 2 ───────────────────────────────────────────────────────────────────
+// Fetch floor prices from OpenSea collection stats
+async function fetchOpenSeaFloorPrices(
+  slugs: string[],
+  apiKey: string,
+): Promise<Record<string, number>> {
+  const floorMap: Record<string, number> = {}
+  await Promise.allSettled(slugs.map(async (slug) => {
+    try {
+      const url = `${OPENSEA_API}/collections/${slug}/stats`
+      const r = await fetch(url, {
+        headers: { 'Accept': 'application/json', 'X-API-KEY': apiKey },
+        signal: AbortSignal.timeout(8_000),
+        cache: 'no-store',
+      })
+      if (!r.ok) return
+      const stats = await r.json()
+      const floor = Number(stats.total?.floor_price ?? 0)
+      if (floor > 0) floorMap[slug] = floor
+    } catch { /* skip */ }
+  }))
+  return floorMap
+}
+
+// ─── PATH 2: Blockscout + RPC fallback ───────────────────────────────────────
+const BLOCKSCOUT = 'https://explorer.inkonchain.com/api/v2'
+
+async function discoverNFTsViaBlockscout(address: string) {
+  // Blockscout v2: get NFT token transfers for address
+  const url = `${BLOCKSCOUT}/addresses/${address}/token-transfers?type=ERC-721%2CERC-1155&filter=to`
+  const res = await fetch(url, {
+    cache: 'no-store',
+    signal: AbortSignal.timeout(12_000),
+    headers: { 'Accept': 'application/json' },
+  })
+  if (!res.ok) return []
+  const data = await res.json()
+  const items: any[] = data.items ?? []
+
+  // Deduplicate by contract+tokenId, keeping only those transferred TO the address
+  const addrLower = address.toLowerCase()
+  const seen = new Map<string, { contract: string; tokenId: bigint }>()
+  for (const tx of items) {
+    const contract = (tx.token?.address ?? tx.token_address ?? '').toLowerCase()
+    const tokenId  = tx.total?.token_id ?? tx.token_id ?? '0'
+    const to       = (tx.to?.hash ?? '').toLowerCase()
+    if (!contract || to !== addrLower) continue
+    const key = `${contract}_${tokenId}`
+    if (!seen.has(key)) seen.set(key, { contract, tokenId: BigInt(tokenId) })
+  }
+  return [...seen.values()]
+}
+
 async function verifyOwnership(candidates: { contract: string; tokenId: bigint }[], address: string) {
+  if (!candidates.length) return []
   const calls = candidates.map((c, i) => ({
     jsonrpc: '2.0', method: 'eth_call',
     params: [{ to: c.contract, data: '0x6352211e' + padUint256(c.tokenId) }, 'latest'],
@@ -93,7 +153,6 @@ async function verifyOwnership(candidates: { contract: string; tokenId: bigint }
   })
 }
 
-// ─── Step 3 ───────────────────────────────────────────────────────────────────
 async function fetchOnChainMeta(owned: { contract: string; tokenId: bigint }[]) {
   const contracts = [...new Set(owned.map(t => t.contract))]
   const [nameRes, symRes, uriRes] = await Promise.all([
@@ -111,41 +170,10 @@ async function fetchOnChainMeta(owned: { contract: string; tokenId: bigint }[]) 
 async function fetchTokenMeta(uri: string) {
   try {
     const url = resolveURI(uri)
-    // Security: only fetch metadata from HTTPS, non-private URLs
     if (!isSafeMetaUrl(url)) return null
     const r = await fetch(url, { signal: AbortSignal.timeout(5_000) })
     return r.ok ? await r.json() : null
   } catch { return null }
-}
-
-// ─── Step 4: Floor prices via Magic Eden ─────────────────────────────────────
-async function fetchFloorPrices(
-  _address: string,
-  contracts: string[]
-): Promise<Record<string, number>> {
-  const floorMap: Record<string, number> = {}
-  contracts.forEach(c => { floorMap[c] = 0 })
-
-  await Promise.allSettled(contracts.map(async (contract) => {
-    try {
-      const url = `https://api-mainnet.magiceden.dev/v4/evm-public/assets/collection-assets?chain=ink&collectionId=${contract}&limit=1`
-      const r = await fetch(url, {
-        headers: { accept: 'application/json' },
-        signal: AbortSignal.timeout(8_000),
-        cache: 'no-store',
-      })
-      if (!r.ok) return
-      const body = await r.json()
-      const items: any[] = body?.assets ?? []
-      if (!items.length) return
-      // floorAsk is at the item wrapper level, not inside item.asset
-      const floorAsk = items[0]?.floorAsk
-      const floor = Number(floorAsk?.price?.amount?.native ?? 0)
-      if (floor > 0) floorMap[contract] = floor
-    } catch { /* ignore per-collection errors */ }
-  }))
-
-  return floorMap
 }
 
 // ─── Main route ───────────────────────────────────────────────────────────────
@@ -155,12 +183,23 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid address' }, { status: 400 })
   }
 
-  const apiKey = process.env.ETHERSCAN_API_KEY
-  // Keep the original 'no_api_key' error — PortfolioContext checks for this exact string
-  if (!apiKey) return NextResponse.json({ error: 'no_api_key', nfts: [], nftValue: 0, total: 0 })
+  const openSeaKey = process.env.OPENSEA_API_KEY
 
+  // ── PATH 1: OpenSea API (primary — best metadata + images + floor prices) ──
+  if (openSeaKey) {
+    try {
+      const ethPrice = await getEthPrice()
+      const result = await fetchNFTsViaOpenSea(address, openSeaKey, ethPrice)
+      return NextResponse.json(result)
+    } catch (e) {
+      console.error('[nfts] opensea error:', e instanceof Error ? e.message : e)
+      // Fall through to Blockscout
+    }
+  }
+
+  // ── PATH 2: Blockscout + on-chain RPC (no API key needed) ──────────────────
   try {
-    const candidates = await discoverNFTs(address, apiKey)
+    const candidates = await discoverNFTsViaBlockscout(address)
     if (!candidates.length) return NextResponse.json({ nfts: [], nftValue: 0, total: 0 })
 
     const owned = await verifyOwnership(candidates, address)
@@ -169,40 +208,33 @@ export async function GET(req: NextRequest) {
     const cap   = owned.slice(0, 20)
     const total = owned.length
     const { cMeta, uriRes } = await fetchOnChainMeta(cap)
-    const contracts = [...new Set(cap.map(t => t.contract))]
+    const ethPrice = await getEthPrice()
 
-    const [metaResults, floorMap, ethPrice] = await Promise.all([
-      Promise.all(cap.map((_, i) => fetchTokenMeta(decodeString(uriRes[i]?.result ?? '')))),
-      fetchFloorPrices(address, contracts),
-      getEthPrice(),
-    ])
+    const metaResults = await Promise.all(
+      cap.map((_, i) => fetchTokenMeta(decodeString(uriRes[i]?.result ?? '')))
+    )
 
     const nfts = cap.map(({ contract, tokenId }, i) => {
       const cm         = cMeta[contract] ?? { name: '', symbol: '' }
       const meta       = metaResults[i]
-      const floorETH   = floorMap[contract] ?? 0
-      const floorUSD   = floorETH * ethPrice
       const collection = cm.name || cm.symbol || `${contract.slice(0, 6)}...${contract.slice(-4)}`
       return {
-        id:           `${contract}_${tokenId}`,
+        id:          `${contract}_${tokenId}`,
         contract,
-        tokenId:      tokenId.toString(),
+        tokenId:     tokenId.toString(),
         collection,
-        symbol:       cm.symbol,
-        name:         meta?.name ?? `${collection} #${tokenId}`,
-        // Security fix #13: sanitize image URL before sending to client
-        image:        sanitizeImage(meta?.image),
-        floorETH,
-        floorUSD,
-        magicEdenUrl: `https://magiceden.io/collections/ink/${contract}`,
+        symbol:      cm.symbol,
+        name:        meta?.name ?? `${collection} #${tokenId}`,
+        image:       sanitizeImage(meta?.image),
+        floorETH:    0,
+        floorUSD:    0,
+        openSeaUrl:  `https://opensea.io/assets/${OPENSEA_CHAIN}/${contract}/${tokenId}`,
       }
     })
 
-    const nftValue = nfts.reduce((s, n) => s + n.floorUSD, 0)
-    return NextResponse.json({ nfts, nftValue, total })
-
+    return NextResponse.json({ nfts, nftValue: 0, total })
   } catch (err: any) {
-    console.error('[nfts]', err?.message)
+    console.error('[nfts] blockscout/rpc error:', err?.message)
     return NextResponse.json({ error: err?.message ?? 'Failed' }, { status: 500 })
   }
 }
