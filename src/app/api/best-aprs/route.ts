@@ -229,16 +229,13 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
 // ─── LpSugar on-chain API for Velodrome on Ink ───────────────────────────────
 // LpSugar is Velodrome's official on-chain data contract. It returns pool data
 // including the REAL APR (fees + VELO gauge emissions), not just fee APR.
-// We call it via eth_call RPC on the Ink chain.
-// Fallback: GeckoTerminal fee-only APR if Sugar call fails.
+// We use Blockscout's query-read-method API to call the contract and get
+// decoded results — no ethers/viem dependency needed.
 //
 // Contract: 0x46e07c9b4016f8E5c3cD0b2fd20147A4d0972120 (Ink chain 57073)
 // Source: https://github.com/velodrome-finance/sugar
-// ABI fetched from Blockscout at runtime and cached.
 
 const LP_SUGAR     = '0x46e07c9b4016f8E5c3cD0b2fd20147A4d0972120'
-const INK_RPC      = 'https://rpc-gel.inkonchain.com'
-const INK_RPC_ALT  = 'https://ink.drpc.org'
 const BLOCKSCOUT   = 'https://explorer.inkonchain.com'
 const VELO_URL     = 'https://velodrome.finance/liquidity?chain=57073'
 const GECKO_BASE   = 'https://api.geckoterminal.com/api/v2'
@@ -249,117 +246,192 @@ const VELO_DEX_IDS = [
   'velodrome-slipstream-ink',
 ]
 
-// ─── ABI cache (fetched from Blockscout once) ────────────────────────────────
-let sugarAbiCache: any[] | null = null
+// ─── Blockscout read-contract proxy ──────────────────────────────────────────
+// Blockscout v2 API can call view functions and return decoded results.
+// Step 1: GET /api/v2/smart-contracts/{addr}/methods-read → find method_id
+// Step 2: POST /api/v2/smart-contracts/{addr}/query-read-method → call & decode
 
-async function getSugarAbi(): Promise<any[] | null> {
-  if (sugarAbiCache) return sugarAbiCache
+// Cache the method_id for LpSugar.all()
+let sugarAllMethodId: string | null = null
+
+async function getSugarMethodId(): Promise<string | null> {
+  if (sugarAllMethodId) return sugarAllMethodId
   try {
     const res = await fetch(
-      `${BLOCKSCOUT}/api?module=contract&action=getabi&address=${LP_SUGAR}`,
+      `${BLOCKSCOUT}/api/v2/smart-contracts/${LP_SUGAR}/methods-read`,
       { signal: AbortSignal.timeout(8_000) }
     )
-    const json = await res.json()
-    if (json.status === '1' && json.result) {
-      sugarAbiCache = JSON.parse(json.result)
-      console.log(`[best-aprs] Sugar ABI cached (${sugarAbiCache!.length} entries)`)
-      return sugarAbiCache
+    if (!res.ok) {
+      console.log(`[best-aprs] Blockscout methods-read: HTTP ${res.status}`)
+      return null
     }
-    console.log(`[best-aprs] Blockscout ABI status: ${json.status}, message: ${json.message}`)
+    const methods: any[] = await res.json()
+    // Find the "all" method that takes (uint256, uint256)
+    const allMethod = methods.find((m: any) =>
+      m.name === 'all' &&
+      m.inputs?.length === 2 &&
+      m.inputs[0]?.type === 'uint256' &&
+      m.inputs[1]?.type === 'uint256'
+    )
+    if (allMethod?.method_id) {
+      sugarAllMethodId = allMethod.method_id
+      console.log(`[best-aprs] Sugar all() method_id: ${sugarAllMethodId}`)
+      return sugarAllMethodId
+    }
+    console.log(`[best-aprs] Sugar all() not found in ${methods.length} methods`)
+    // Log available methods for debugging
+    for (const m of methods.slice(0, 10)) {
+      console.log(`  method: ${m.name}(${(m.inputs ?? []).map((i: any) => i.type).join(',')}) → ${m.method_id}`)
+    }
   } catch (e) {
-    console.error('[best-aprs] Failed to fetch Sugar ABI from Blockscout:', e)
+    console.error('[best-aprs] Blockscout methods-read error:', e)
   }
   return null
 }
 
-// ─── LpSugar RPC call ────────────────────────────────────────────────────────
-// Calls LpSugar.all(limit, offset) via eth_call and decodes using ethers.js
+// ─── LpSugar call via Blockscout ─────────────────────────────────────────────
 async function fetchLpSugar(): Promise<AprEntry[]> {
   const out: AprEntry[] = []
 
-  // Step 1: Get ABI from Blockscout
-  const abi = await getSugarAbi()
-  if (!abi) throw new Error('No Sugar ABI available from Blockscout')
+  // Step 1: Get method_id for all(uint256, uint256)
+  const methodId = await getSugarMethodId()
+  if (!methodId) throw new Error('Could not find Sugar all() method_id from Blockscout')
 
-  // Step 2: Dynamic import ethers.js for ABI encoding/decoding
-  // Requires: npm install ethers
-  let Interface: any
-  try {
-    const ethers = await import('ethers')
-    Interface = ethers.Interface
-  } catch {
-    throw new Error('ethers package not installed — run: npm install ethers')
+  // Step 2: Call the contract via Blockscout's query-read-method
+  const res = await fetch(
+    `${BLOCKSCOUT}/api/v2/smart-contracts/${LP_SUGAR}/query-read-method`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        args: ['200', '0'],       // all(limit=200, offset=0)
+        method_id: methodId,
+        contract_type: 'regular',
+      }),
+      signal: AbortSignal.timeout(60_000), // Sugar call can be slow
+    }
+  )
+
+  if (!res.ok) {
+    throw new Error(`Blockscout query-read-method: HTTP ${res.status}`)
   }
 
-  const iface = new Interface(abi)
+  const data = await res.json()
 
-  // Step 3: Encode the function call: all(200, 0)
-  // 200 limit should cover all pools on Ink (currently ~20-50)
-  const calldata = iface.encodeFunctionData('all', [200, 0])
+  // Step 3: Parse the Blockscout response
+  // Blockscout returns decoded results in data.result.output or data.result
+  // The format for tuple[] is typically an array of arrays
+  const output = data?.result?.output ?? data?.result ?? data
+  if (!output) throw new Error('Empty response from Blockscout query-read-method')
 
-  // Step 4: Make eth_call to Ink RPC (with fallback RPC)
-  let rpcResult: string | null = null
-  for (const rpc of [INK_RPC, INK_RPC_ALT]) {
-    try {
-      const res = await fetch(rpc, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'eth_call',
-          params: [{ to: LP_SUGAR, data: calldata }, 'latest'],
-        }),
-        signal: AbortSignal.timeout(30_000),
-      })
-      const json = await res.json()
-      if (json.error) {
-        console.log(`[best-aprs] Sugar RPC error (${rpc}): ${json.error.message}`)
-        continue
-      }
-      rpcResult = json.result
-      break
-    } catch (e) {
-      console.log(`[best-aprs] Sugar RPC timeout/error (${rpc}):`, e)
+  // Debug: log raw structure
+  console.log(`[best-aprs] Sugar Blockscout response type: ${typeof output}, isArray: ${Array.isArray(output)}`)
+  if (Array.isArray(output) && output.length > 0) {
+    console.log(`[best-aprs] Sugar first item keys:`, typeof output[0] === 'object' ? Object.keys(output[0]).slice(0, 10).join(', ') : typeof output[0])
+  }
+
+  // Parse pools from response
+  // Blockscout may return as:
+  // (a) Array of objects with named fields { symbol, apr, gauge_alive, ... }
+  // (b) Array of tuples where we match by position to Lp struct fields
+  // (c) Single output item wrapping the array: [{ type: "tuple[]", value: [...] }]
+  let pools: any[] = []
+
+  if (Array.isArray(output)) {
+    // Check if it's wrapped in output format: [{type: "tuple[]", value: [...]}]
+    if (output.length > 0 && output[0]?.type && output[0]?.value) {
+      pools = Array.isArray(output[0].value) ? output[0].value : []
+    } else {
+      pools = output
+    }
+  } else if (output?.output && Array.isArray(output.output)) {
+    if (output.output[0]?.value) {
+      pools = Array.isArray(output.output[0].value) ? output.output[0].value : []
+    } else {
+      pools = output.output
     }
   }
 
-  if (!rpcResult) throw new Error('All RPC endpoints failed for Sugar call')
+  console.log(`[best-aprs] LpSugar: ${pools.length} pools from Blockscout`)
 
-  // Step 5: Decode the response
-  const decoded = iface.decodeFunctionResult('all', rpcResult)
-  const pools = decoded[0] // Array of Lp structs
+  if (pools.length === 0) {
+    // Log the raw response for debugging
+    const preview = JSON.stringify(data).slice(0, 500)
+    console.log(`[best-aprs] Sugar raw response preview: ${preview}`)
+    throw new Error('Sugar returned 0 pools — response format may have changed')
+  }
 
-  console.log(`[best-aprs] LpSugar: ${pools.length} pools returned from contract`)
-
-  // Step 6: Map to AprEntry[]
+  // Step 4: Map each pool to AprEntry
+  // Lp struct fields from Sugar README (in order):
+  // lp, symbol, decimals, stable, total_supply, token0, reserve0, token1, reserve1,
+  // gauge, gauge_liquidity, gauge_alive, fee, bribe, factory,
+  // emissions, emissions_token, pool_fee, unstaked_fee,
+  // token0_fees, token1_fees, nfpm, alm, apr, ...
   for (const p of pools) {
     try {
-      const symbol = String(p.symbol ?? '')
-      if (!symbol) continue
+      // Handle both object (named fields) and array (positional) formats
+      let symbol: string
+      let apr: any
+      let gaugeAlive: boolean
+      let stable: boolean
 
-      // Parse token names from pool symbol
-      // Formats: "vAMM-WETH/USDC.e" (V2 volatile), "sAMM-USDC.e/USDT0" (V2 stable),
-      //          "CL200-WETH/USDC.e" (Slipstream CL with tickSpacing=200)
-      const match = symbol.match(/^(?:vAMM|sAMM|CL\d+)-(.+)\/(.+)$/)
-      if (!match) {
-        // Some pools might have different naming, try splitting by /
-        const slashIdx = symbol.indexOf('/')
-        if (slashIdx === -1) continue
-        // Skip prefix before first dash
-        const dashIdx = symbol.indexOf('-')
-        const base = dashIdx >= 0 ? symbol.slice(dashIdx + 1, slashIdx) : symbol.slice(0, slashIdx)
-        const quote = symbol.slice(slashIdx + 1)
-        if (!base || !quote) continue
-        // Process below with these values
-        processPool(p, symbol, base.trim(), quote.trim(), out)
+      if (Array.isArray(p)) {
+        // Positional: p[1]=symbol, p[3]=stable, p[12]=gauge_alive, p[23]=apr (approximate)
+        symbol     = String(p[1] ?? '')
+        stable     = Boolean(p[3])
+        gaugeAlive = Boolean(p[12])
+        apr        = p[23] // APR field position — may need adjustment
+      } else if (typeof p === 'object' && p !== null) {
+        // Named fields
+        symbol     = String(p.symbol ?? p[1] ?? '')
+        stable     = Boolean(p.stable ?? p[3] ?? false)
+        gaugeAlive = Boolean(p.gauge_alive ?? p.gaugeAlive ?? p[12] ?? false)
+        apr        = p.apr ?? p[23] ?? 0
+      } else {
         continue
       }
 
-      const [, base, quote] = match
-      processPool(p, symbol, base.trim(), quote.trim(), out)
+      if (!symbol) continue
+
+      // Parse token names from pool symbol
+      // Formats: "vAMM-WETH/USDC.e", "sAMM-USDC.e/USDT0", "CL200-WETH/USDC.e"
+      const match = symbol.match(/^(?:vAMM|sAMM|CL\d+)-(.+)\/(.+)$/)
+      let base: string, quote: string
+      if (match) {
+        base = match[1].trim()
+        quote = match[2].trim()
+      } else {
+        // Fallback: split by /
+        const slashIdx = symbol.indexOf('/')
+        if (slashIdx === -1) continue
+        const dashIdx = symbol.indexOf('-')
+        base = (dashIdx >= 0 ? symbol.slice(dashIdx + 1, slashIdx) : symbol.slice(0, slashIdx)).trim()
+        quote = symbol.slice(slashIdx + 1).trim()
+      }
+      if (!base || !quote) continue
+
+      const isCL = symbol.startsWith('CL')
+      const isStablePool = symbol.startsWith('sAMM') || stable || allStable([base, quote])
+
+      // Parse APR value — auto-detect scaling
+      const aprNum = parseAprValue(apr)
+      if (aprNum < 0 || aprNum > 50_000) continue
+
+      const suffix = isStablePool ? ' (stable)' : isCL ? ' (CL)' : ''
+      const label  = `${base}-${quote}${suffix}`
+
+      out.push({
+        protocol: isCL ? 'Velodrome V3' : 'Velodrome',
+        logo:     'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48',
+        url:      VELO_URL,
+        tokens:   [base, quote],
+        label,
+        apr:      Math.round(aprNum * 100) / 100,
+        tvl:      0, // Will be enriched from GeckoTerminal
+        type:     'pool',
+        isStable: isStablePool,
+      })
     } catch (e) {
-      // Skip individual pool errors
       console.log(`[best-aprs] Sugar pool parse error:`, e)
     }
   }
@@ -375,59 +447,34 @@ async function fetchLpSugar(): Promise<AprEntry[]> {
   return out
 }
 
-// Helper: process a single Sugar pool into an AprEntry
-function processPool(
-  p: any, symbol: string, base: string, quote: string, out: AprEntry[]
-) {
-  const tokens = [base, quote]
+// Parse APR from Sugar contract — handles different scaling formats
+function parseAprValue(raw: any): number {
+  if (raw === null || raw === undefined) return 0
 
-  // Pool type detection from symbol prefix
-  const isCL     = symbol.startsWith('CL')
-  const isStablePool = symbol.startsWith('sAMM') || allStable(tokens)
-
-  // APR from the Sugar contract
-  // The contract returns APR as a uint256. Scaling depends on the Sugar version:
-  // - Most common: percentage with 18 decimals (245.3% → 245300000000000000000)
-  // - Or: basis points (245.3% → 24530)
-  // We auto-detect based on magnitude.
-  const aprRaw = BigInt(p.apr?.toString() ?? '0')
-  let apr: number
-
-  if (aprRaw === 0n) {
-    apr = 0
-  } else if (aprRaw > 10n ** 15n) {
-    // Likely 18-decimal format: divide by 10^18
-    apr = Number(aprRaw) / 1e18
-  } else if (aprRaw > 100_000n) {
-    // Likely basis points × 100 or similar: divide by 100
-    apr = Number(aprRaw) / 100
-  } else {
-    // Likely direct percentage or basis points
-    // If > 10000, treat as basis points
-    apr = Number(aprRaw) > 10000 ? Number(aprRaw) / 100 : Number(aprRaw)
+  // If it's a string that looks like a big number (18 decimals)
+  const str = String(raw)
+  try {
+    const n = BigInt(str)
+    if (n === 0n) return 0
+    if (n > 10n ** 15n) {
+      // 18-decimal format: 245.3% → 245300000000000000000
+      return Number(n) / 1e18
+    }
+    if (n > 100_000n) {
+      // Basis points × 100 or similar
+      return Number(n) / 100
+    }
+    // Direct percentage or basis points
+    return Number(n) > 10000 ? Number(n) / 100 : Number(n)
+  } catch {
+    // Not a BigInt — try as float
+    const f = parseFloat(str)
+    if (isNaN(f)) return 0
+    // If very large, likely 18-decimal
+    if (f > 1e15) return f / 1e18
+    if (f > 100_000) return f / 100
+    return f > 10000 ? f / 100 : f
   }
-
-  // Cap unrealistic values
-  if (apr > 50_000 || apr < 0) return
-
-  // Check if gauge is alive (receiving emissions)
-  // Pool is still valid even without gauge (fee revenue), but APR may be 0
-  const gaugeAlive = Boolean(p.gauge_alive ?? p.gaugeAlive ?? false)
-
-  const suffix = isStablePool ? ' (stable)' : isCL ? ' (CL)' : ''
-  const label  = `${base}-${quote}${suffix}`
-
-  out.push({
-    protocol: isCL ? 'Velodrome V3' : 'Velodrome',
-    logo:     'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48',
-    url:      VELO_URL,
-    tokens,
-    label,
-    apr:      Math.round(apr * 100) / 100,
-    tvl:      0, // Will be enriched from GeckoTerminal
-    type:     'pool',
-    isStable: isStablePool,
-  })
 }
 
 // ─── GeckoTerminal for TVL data and fallback ─────────────────────────────────
