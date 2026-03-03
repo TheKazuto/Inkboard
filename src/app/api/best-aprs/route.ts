@@ -336,9 +336,11 @@ async function fetchInkyFromSubgraph(): Promise<InkyPool[]> {
 }
 
 // Source 1: InkySwap native /api/pairs
+// Real response fields: { pair_address, token0: { symbol }, token1: { symbol },
+//   liquidity_usd, volume_24h, volume_30d, apr, daily_fees, version, fee_tier }
 async function fetchInkyFromNativeApi(): Promise<InkyPool[]> {
   const res = await fetch(`${INKY_API_BASE}/pairs`, {
-    signal: AbortSignal.timeout(8_000),
+    signal: AbortSignal.timeout(12_000),
     headers: { Accept: 'application/json' },
   })
   if (!res.ok) throw new Error(`InkySwap API HTTP ${res.status}`)
@@ -348,20 +350,46 @@ async function fetchInkyFromNativeApi(): Promise<InkyPool[]> {
 
   const out: InkyPool[] = []
   for (const p of pairs) {
-    // Flexible field extraction — adapt to whatever the API returns
+    // Token symbols - actual structure: token0.symbol / token1.symbol
     const base  = p.token0?.symbol ?? p.baseToken?.symbol ?? p.base?.symbol ?? ''
     const quote = p.token1?.symbol ?? p.quoteToken?.symbol ?? p.quote?.symbol ?? ''
     if (!base || !quote) continue
 
-    const tvl    = parseFloat(p.liquidity?.usd ?? p.tvlUsd ?? p.reserveUSD ?? p.liquidity ?? '0')
-    const vol24h = parseFloat(p.volume?.h24 ?? p.volumeUSD?.h24 ?? p.volume24h ?? p.volumeUsd ?? '0')
+    // TVL - actual field: liquidity_usd (number, not nested)
+    const tvl = parseFloat(
+      p.liquidity_usd ?? p.liquidity?.usd ?? p.tvlUsd ?? p.reserveUSD ?? '0'
+    )
+    // Volume - actual field: volume_24h (number, not nested)
+    const vol24h = parseFloat(
+      p.volume_24h ?? p.volume?.h24 ?? p.volumeUSD?.h24 ?? p.volumeUsd ?? '0'
+    )
     if (tvl < 50) continue
 
+    // APR - the /api/pairs apr field is the TOTAL APR shown on inkyswap.com
+    // (includes fees + rewards combined)
+    const apiApr = parseFloat(p.apr ?? '0')
+    const dailyFees = parseFloat(p.daily_fees ?? '0')
+
+    // Use API apr directly; fallback to manual calc only if apr field is missing
+    let feeApr = 0
+    if (apiApr > 0) {
+      feeApr = apiApr  // total APR from API (fees + rewards)
+    } else if (dailyFees > 0 && tvl > 0) {
+      feeApr = (dailyFees * 365 / tvl) * 100
+    } else if (vol24h > 0 && tvl > 0) {
+      const feeTier = parseFloat((p.fee_tier ?? '0.3%').replace('%', '')) / 100
+      feeApr = (vol24h * feeTier * 365 / tvl) * 100
+    }
+
+    // rewardApr stays 0 - apr field already includes everything
+    const rewardApr = 0
+
     const pairStable = allStable([base, quote])
-    const feeApr = tvl > 0 ? (vol24h * INKY_FEE * 365 / tvl) * 100 : 0
-    out.push({ base, quote, tvl, vol24h, feeApr, rewardApr: 0, isStable: pairStable })
+    out.push({ base, quote, tvl, vol24h, feeApr, rewardApr, isStable: pairStable })
   }
-  console.log(`[best-aprs] InkySwap native API: ${out.length} pools from ${pairs.length} pairs`)
+
+  const withApr = out.filter(p => p.feeApr + p.rewardApr > 0).length
+  console.log(`[best-aprs] InkySwap native API: ${out.length} pools from ${pairs.length} pairs (${withApr} with APR > 0)`)
   return out
 }
 
@@ -463,26 +491,26 @@ async function fetchInkyFromGeckoTerminal(): Promise<InkyPool[]> {
   return out
 }
 
-// Orchestrator: try each source in order (subgraph first for reward APR)
+// Orchestrator: native API first (has apr field), then fallbacks
 async function fetchInkySwapData(): Promise<AprEntry[]> {
   let pools: InkyPool[] = []
   let source = ''
 
-  // 0) InkySwap subgraph (v2/v3/v4) - primary source with reward APR
+  // 0) InkySwap native /api/pairs - PRIMARY source (returns apr directly)
   try {
-    pools = await fetchInkyFromSubgraph()
-    source = 'subgraph'
+    pools = await fetchInkyFromNativeApi()
+    source = 'native API'
   } catch (e: any) {
-    console.log('[best-aprs] InkySwap subgraph failed: ' + e.message)
+    console.log('[best-aprs] InkySwap native API failed: ' + e.message)
   }
 
-  // 1) InkySwap native API fallback
+  // 1) InkySwap subgraph fallback (v2/v3/v4)
   if (pools.length === 0) {
     try {
-      pools = await fetchInkyFromNativeApi()
-      source = 'native API'
+      pools = await fetchInkyFromSubgraph()
+      source = 'subgraph'
     } catch (e) {
-      console.log(`[best-aprs] InkySwap native API failed: ${e}`)
+      console.log(`[best-aprs] InkySwap subgraph failed: ${e}`)
     }
   }
 
