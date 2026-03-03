@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { encodeFunctionData, decodeFunctionResult, type Abi } from 'viem'
 
 export const revalidate = 0
 
@@ -229,13 +230,15 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
 // ─── LpSugar on-chain API for Velodrome on Ink ───────────────────────────────
 // LpSugar is Velodrome's official on-chain data contract. It returns pool data
 // including the REAL APR (fees + VELO gauge emissions), not just fee APR.
-// We use Blockscout's query-read-method API to call the contract and get
-// decoded results — no ethers/viem dependency needed.
+// We call it via eth_call RPC + viem for ABI encoding/decoding.
+// viem is already a project dependency (used by wagmi/rainbowkit).
 //
 // Contract: 0x46e07c9b4016f8E5c3cD0b2fd20147A4d0972120 (Ink chain 57073)
 // Source: https://github.com/velodrome-finance/sugar
 
-const LP_SUGAR     = '0x46e07c9b4016f8E5c3cD0b2fd20147A4d0972120'
+const LP_SUGAR     = '0x46e07c9b4016f8E5c3cD0b2fd20147A4d0972120' as const
+const INK_RPC      = 'https://rpc-gel.inkonchain.com'
+const INK_RPC_ALT  = 'https://ink.drpc.org'
 const BLOCKSCOUT   = 'https://explorer.inkonchain.com'
 const VELO_URL     = 'https://velodrome.finance/liquidity?chain=57073'
 const GECKO_BASE   = 'https://api.geckoterminal.com/api/v2'
@@ -246,151 +249,120 @@ const VELO_DEX_IDS = [
   'velodrome-slipstream-ink',
 ]
 
-// ─── Blockscout read-contract proxy ──────────────────────────────────────────
-// Blockscout v2 API can call view functions and return decoded results.
-// Step 1: GET /api/v2/smart-contracts/{addr}/methods-read → find method_id
-// Step 2: POST /api/v2/smart-contracts/{addr}/query-read-method → call & decode
+// ─── ABI cache ───────────────────────────────────────────────────────────────
+// Fetched from Blockscout etherscan-compatible API and cached in-memory
+let sugarAbiCache: Abi | null = null
 
-// Cache the method_id for LpSugar.all()
-let sugarAllMethodId: string | null = null
-
-async function getSugarMethodId(): Promise<string | null> {
-  if (sugarAllMethodId) return sugarAllMethodId
+async function getSugarAbi(): Promise<Abi | null> {
+  if (sugarAbiCache) return sugarAbiCache
   try {
     const res = await fetch(
-      `${BLOCKSCOUT}/api/v2/smart-contracts/${LP_SUGAR}/methods-read`,
-      { signal: AbortSignal.timeout(8_000) }
+      `${BLOCKSCOUT}/api?module=contract&action=getabi&address=${LP_SUGAR}`,
+      { signal: AbortSignal.timeout(10_000) }
     )
-    if (!res.ok) {
-      console.log(`[best-aprs] Blockscout methods-read: HTTP ${res.status}`)
-      return null
+    const json = await res.json()
+    if (json.status === '1' && json.result) {
+      sugarAbiCache = JSON.parse(json.result) as Abi
+      console.log(`[best-aprs] Sugar ABI cached (${(sugarAbiCache as any[]).length} entries)`)
+      return sugarAbiCache
     }
-    const methods: any[] = await res.json()
-    // Find the "all" method that takes (uint256, uint256)
-    const allMethod = methods.find((m: any) =>
-      m.name === 'all' &&
-      m.inputs?.length === 2 &&
-      m.inputs[0]?.type === 'uint256' &&
-      m.inputs[1]?.type === 'uint256'
-    )
-    if (allMethod?.method_id) {
-      sugarAllMethodId = allMethod.method_id
-      console.log(`[best-aprs] Sugar all() method_id: ${sugarAllMethodId}`)
-      return sugarAllMethodId
-    }
-    console.log(`[best-aprs] Sugar all() not found in ${methods.length} methods`)
-    // Log available methods for debugging
-    for (const m of methods.slice(0, 10)) {
-      console.log(`  method: ${m.name}(${(m.inputs ?? []).map((i: any) => i.type).join(',')}) → ${m.method_id}`)
-    }
+    console.log(`[best-aprs] Blockscout ABI: status=${json.status} message=${json.message}`)
   } catch (e) {
-    console.error('[best-aprs] Blockscout methods-read error:', e)
+    console.error('[best-aprs] Failed to fetch Sugar ABI:', e)
   }
   return null
 }
 
-// ─── LpSugar call via Blockscout ─────────────────────────────────────────────
+// ─── LpSugar RPC call ────────────────────────────────────────────────────────
 async function fetchLpSugar(): Promise<AprEntry[]> {
   const out: AprEntry[] = []
 
-  // Step 1: Get method_id for all(uint256, uint256)
-  const methodId = await getSugarMethodId()
-  if (!methodId) throw new Error('Could not find Sugar all() method_id from Blockscout')
+  // Step 1: Get ABI
+  const abi = await getSugarAbi()
+  if (!abi) throw new Error('Could not fetch Sugar ABI from Blockscout')
 
-  // Step 2: Call the contract via Blockscout's query-read-method
-  const res = await fetch(
-    `${BLOCKSCOUT}/api/v2/smart-contracts/${LP_SUGAR}/query-read-method`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        args: ['200', '0'],       // all(limit=200, offset=0)
-        method_id: methodId,
-        contract_type: 'regular',
-      }),
-      signal: AbortSignal.timeout(60_000), // Sugar call can be slow
-    }
-  )
-
-  if (!res.ok) {
-    throw new Error(`Blockscout query-read-method: HTTP ${res.status}`)
+  // Step 2: Encode calldata for all(200, 0)
+  let calldata: `0x${string}`
+  try {
+    calldata = encodeFunctionData({
+      abi,
+      functionName: 'all',
+      args: [200n, 0n],
+    })
+  } catch (e) {
+    console.error('[best-aprs] Sugar ABI encode error:', e)
+    throw new Error(`Failed to encode Sugar all() call: ${e}`)
   }
 
-  const data = await res.json()
-
-  // Step 3: Parse the Blockscout response
-  // Blockscout returns decoded results in data.result.output or data.result
-  // The format for tuple[] is typically an array of arrays
-  const output = data?.result?.output ?? data?.result ?? data
-  if (!output) throw new Error('Empty response from Blockscout query-read-method')
-
-  // Debug: log raw structure
-  console.log(`[best-aprs] Sugar Blockscout response type: ${typeof output}, isArray: ${Array.isArray(output)}`)
-  if (Array.isArray(output) && output.length > 0) {
-    console.log(`[best-aprs] Sugar first item keys:`, typeof output[0] === 'object' ? Object.keys(output[0]).slice(0, 10).join(', ') : typeof output[0])
-  }
-
-  // Parse pools from response
-  // Blockscout may return as:
-  // (a) Array of objects with named fields { symbol, apr, gauge_alive, ... }
-  // (b) Array of tuples where we match by position to Lp struct fields
-  // (c) Single output item wrapping the array: [{ type: "tuple[]", value: [...] }]
-  let pools: any[] = []
-
-  if (Array.isArray(output)) {
-    // Check if it's wrapped in output format: [{type: "tuple[]", value: [...]}]
-    if (output.length > 0 && output[0]?.type && output[0]?.value) {
-      pools = Array.isArray(output[0].value) ? output[0].value : []
-    } else {
-      pools = output
-    }
-  } else if (output?.output && Array.isArray(output.output)) {
-    if (output.output[0]?.value) {
-      pools = Array.isArray(output.output[0].value) ? output.output[0].value : []
-    } else {
-      pools = output.output
-    }
-  }
-
-  console.log(`[best-aprs] LpSugar: ${pools.length} pools from Blockscout`)
-
-  if (pools.length === 0) {
-    // Log the raw response for debugging
-    const preview = JSON.stringify(data).slice(0, 500)
-    console.log(`[best-aprs] Sugar raw response preview: ${preview}`)
-    throw new Error('Sugar returned 0 pools — response format may have changed')
-  }
-
-  // Step 4: Map each pool to AprEntry
-  // Lp struct fields from Sugar README (in order):
-  // lp, symbol, decimals, stable, total_supply, token0, reserve0, token1, reserve1,
-  // gauge, gauge_liquidity, gauge_alive, fee, bribe, factory,
-  // emissions, emissions_token, pool_fee, unstaked_fee,
-  // token0_fees, token1_fees, nfpm, alm, apr, ...
-  for (const p of pools) {
+  // Step 3: eth_call to Ink RPC (with fallback)
+  let rpcResult: `0x${string}` | null = null
+  for (const rpc of [INK_RPC, INK_RPC_ALT]) {
     try {
-      // Handle both object (named fields) and array (positional) formats
-      let symbol: string
-      let apr: any
-      let gaugeAlive: boolean
-      let stable: boolean
-
-      if (Array.isArray(p)) {
-        // Positional: p[1]=symbol, p[3]=stable, p[12]=gauge_alive, p[23]=apr (approximate)
-        symbol     = String(p[1] ?? '')
-        stable     = Boolean(p[3])
-        gaugeAlive = Boolean(p[12])
-        apr        = p[23] // APR field position — may need adjustment
-      } else if (typeof p === 'object' && p !== null) {
-        // Named fields
-        symbol     = String(p.symbol ?? p[1] ?? '')
-        stable     = Boolean(p.stable ?? p[3] ?? false)
-        gaugeAlive = Boolean(p.gauge_alive ?? p.gaugeAlive ?? p[12] ?? false)
-        apr        = p.apr ?? p[23] ?? 0
-      } else {
+      const res = await fetch(rpc, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'eth_call',
+          params: [{ to: LP_SUGAR, data: calldata }, 'latest'],
+        }),
+        signal: AbortSignal.timeout(30_000),
+      })
+      const json = await res.json()
+      if (json.error) {
+        console.log(`[best-aprs] Sugar RPC error (${rpc}): ${json.error.message}`)
         continue
       }
+      if (json.result && json.result !== '0x') {
+        rpcResult = json.result as `0x${string}`
+        console.log(`[best-aprs] Sugar RPC success via ${rpc} (${rpcResult.length} hex chars)`)
+        break
+      }
+    } catch (e) {
+      console.log(`[best-aprs] Sugar RPC failed (${rpc}):`, e)
+    }
+  }
 
+  if (!rpcResult) throw new Error('All RPC endpoints failed for Sugar call')
+
+  // Step 4: Decode the response using viem
+  let pools: readonly any[]
+  try {
+    const decoded = decodeFunctionResult({
+      abi,
+      functionName: 'all',
+      data: rpcResult,
+    })
+    // decoded is the return value — for all() it's a tuple with one element: Lp[]
+    pools = Array.isArray(decoded) ? decoded : [decoded]
+    // If the first element is an array of tuples, that's our pool list
+    if (pools.length === 1 && Array.isArray(pools[0])) {
+      pools = pools[0]
+    }
+  } catch (e) {
+    console.error('[best-aprs] Sugar decode error:', e)
+    throw new Error(`Failed to decode Sugar response: ${e}`)
+  }
+
+  console.log(`[best-aprs] LpSugar: ${pools.length} pools decoded from contract`)
+
+  // Debug: log first pool's keys to understand the struct shape
+  if (pools.length > 0) {
+    const first = pools[0] as any
+    const keys = typeof first === 'object' ? Object.keys(first).filter(k => isNaN(Number(k))) : []
+    console.log(`[best-aprs] Sugar pool struct keys: ${keys.slice(0, 15).join(', ')}`)
+    // Log first pool's symbol and apr for debugging
+    console.log(`[best-aprs] Sugar first pool: symbol=${first?.symbol}, apr=${first?.apr}, stable=${first?.stable}, gauge_alive=${first?.gauge_alive}`)
+  }
+
+  // Step 5: Map to AprEntry[]
+  for (const p of pools) {
+    try {
+      const pool = p as any
+
+      // viem decodes structs as objects with named properties
+      const symbol = String(pool.symbol ?? '')
       if (!symbol) continue
 
       // Parse token names from pool symbol
@@ -401,7 +373,6 @@ async function fetchLpSugar(): Promise<AprEntry[]> {
         base = match[1].trim()
         quote = match[2].trim()
       } else {
-        // Fallback: split by /
         const slashIdx = symbol.indexOf('/')
         if (slashIdx === -1) continue
         const dashIdx = symbol.indexOf('-')
@@ -411,10 +382,11 @@ async function fetchLpSugar(): Promise<AprEntry[]> {
       if (!base || !quote) continue
 
       const isCL = symbol.startsWith('CL')
-      const isStablePool = symbol.startsWith('sAMM') || stable || allStable([base, quote])
+      const isStablePool = symbol.startsWith('sAMM') || Boolean(pool.stable) || allStable([base, quote])
 
-      // Parse APR value — auto-detect scaling
-      const aprNum = parseAprValue(apr)
+      // APR from Sugar: viem returns BigInt for uint256 fields
+      const aprRaw = pool.apr
+      const aprNum = parseAprValue(aprRaw)
       if (aprNum < 0 || aprNum > 50_000) continue
 
       const suffix = isStablePool ? ' (stable)' : isCL ? ' (CL)' : ''
@@ -427,7 +399,7 @@ async function fetchLpSugar(): Promise<AprEntry[]> {
         tokens:   [base, quote],
         label,
         apr:      Math.round(aprNum * 100) / 100,
-        tvl:      0, // Will be enriched from GeckoTerminal
+        tvl:      0, // Enriched from GeckoTerminal below
         type:     'pool',
         isStable: isStablePool,
       })
@@ -447,30 +419,22 @@ async function fetchLpSugar(): Promise<AprEntry[]> {
   return out
 }
 
-// Parse APR from Sugar contract — handles different scaling formats
+// Parse APR value from Sugar uint256 — auto-detect scaling
 function parseAprValue(raw: any): number {
   if (raw === null || raw === undefined) return 0
-
-  // If it's a string that looks like a big number (18 decimals)
-  const str = String(raw)
   try {
-    const n = BigInt(str)
+    const n = typeof raw === 'bigint' ? raw : BigInt(String(raw))
     if (n === 0n) return 0
-    if (n > 10n ** 15n) {
-      // 18-decimal format: 245.3% → 245300000000000000000
-      return Number(n) / 1e18
-    }
-    if (n > 100_000n) {
-      // Basis points × 100 or similar
-      return Number(n) / 100
-    }
+    // Sugar returns APR as uint256. Most common: 18-decimal scaled
+    // e.g. 245.3% → 245_300000000000000000 (245.3 × 10^18)
+    if (n > 10n ** 15n) return Number(n) / 1e18
+    // Basis points × 100
+    if (n > 100_000n) return Number(n) / 100
     // Direct percentage or basis points
     return Number(n) > 10000 ? Number(n) / 100 : Number(n)
   } catch {
-    // Not a BigInt — try as float
-    const f = parseFloat(str)
+    const f = parseFloat(String(raw))
     if (isNaN(f)) return 0
-    // If very large, likely 18-decimal
     if (f > 1e15) return f / 1e18
     if (f > 100_000) return f / 100
     return f > 10000 ? f / 100 : f
