@@ -82,19 +82,31 @@ const PROTOCOL_META: Record<string, { name: string; logo: string; urlBase: strin
     logo: 'https://icons.llamao.fi/icons/protocols/yearn-finance?w=48&h=48',
     urlBase: 'https://yearn.fi/vaults',
   },
+  'tydro': {
+    name: 'Tydro',
+    logo: 'https://icons.llamao.fi/icons/protocols/tydro?w=48&h=48',
+    urlBase: 'https://app.tydro.com',
+  },
 }
 
-// Infer pool type from DefiLlama project and pool metadata
-function inferType(project: string, poolMeta: string | null): 'pool' | 'vault' | 'lend' {
+// Infer pool type from DefiLlama project, pool metadata, and exposure
+function inferType(project: string, poolMeta: string | null, exposure: string | null): 'pool' | 'vault' | 'lend' {
   const p = project.toLowerCase()
   const m = (poolMeta ?? '').toLowerCase()
+  const e = (exposure ?? '').toLowerCase()
 
-  // Lending protocols
+  // Lending protocols (explicit list)
   if (p.includes('aave') || p.includes('compound') || p.includes('morpho') ||
       p.includes('silo') || p.includes('euler') || p.includes('fraxlend') ||
+      p.includes('tydro') || p.includes('radiant') || p.includes('spark') ||
+      p.includes('benqi') || p.includes('moonwell') || p.includes('seamless') ||
+      p.includes('ionic') || p.includes('dforce') || p.includes('venus') ||
       m.includes('lend') || m.includes('supply') || m.includes('borrow')) {
     return 'lend'
   }
+
+  // DefiLlama "single" exposure with no pool pair → lending market
+  if (e === 'single') return 'lend'
 
   // Vault / yield aggregator protocols
   if (p.includes('beefy') || p.includes('yearn') || p.includes('convex') ||
@@ -145,6 +157,10 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
 
     console.log(`[best-aprs] DefiLlama: ${pools.length} total pools, ${inkPools.length} on Ink`)
 
+    // Debug: log unique projects found on Ink
+    const projects = [...new Set(inkPools.map((p: any) => p.project))]
+    console.log(`[best-aprs] Ink projects: ${projects.join(', ')}`)
+
     for (const p of inkPools) {
       const project = p.project ?? ''
       const symbol  = p.symbol ?? ''
@@ -153,13 +169,15 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
       const tvl     = p.tvlUsd ?? 0
 
       // Skip tiny pools and zero APY
-      if (tvl < 500 || apy <= 0) continue
+      if (tvl < 100 || apy <= 0) continue
 
       // Cap unrealistic APYs (>50000% likely error)
       if (apy > 50_000) continue
 
-      // Parse token symbols from the symbol field (e.g. "USDC-WETH" or "USDC")
-      const tokens = symbol
+      // Parse token symbols from the symbol field
+      // DefiLlama formats: "USDC-WETH", "USDC", "WETH-USDC (CL200)", "WETH-USDC (stable)"
+      const cleanSymbol = symbol.replace(/\s*\([^)]*\)\s*/g, '') // Remove parenthesized suffixes
+      const tokens = cleanSymbol
         .split(/[-\/]/)
         .map((t: string) => t.trim())
         .filter(Boolean)
@@ -167,7 +185,7 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
       // Use APY as displayed (DefiLlama already annualizes)
       const apr = apy
 
-      const type = inferType(project, p.poolMeta ?? null)
+      const type = inferType(project, p.poolMeta ?? null, p.exposure ?? null)
 
       // Get protocol display info
       const meta = PROTOCOL_META[project] ?? {
