@@ -16,6 +16,10 @@ interface FGData {
   monthAgo: FGEntry
 }
 
+// Module-level cache — F&G updates once daily so 30min TTL is generous
+const CACHE_TTL = 30 * 60 * 1000
+let cachedFG: { data: FGData; fetchedAt: number } | null = null
+
 function getColor(v: number): string {
   if (v <= 25) return '#ef4444'   // Extreme Fear — vermelho
   if (v <= 45) return '#f97316'   // Fear — laranja
@@ -118,17 +122,24 @@ function GaugeArc({ value }: { value: number }) {
 }
 
 export default function FearAndGreed() {
-  const [data, setData] = useState<FGData | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [data, setData] = useState<FGData | null>(cachedFG?.data ?? null)
+  const [loading, setLoading] = useState(!cachedFG)
   const [error, setError] = useState(false)
 
-  const fetchData = async () => {
+  const fetchData = async (force = false) => {
+    // Serve from cache if fresh and not forced
+    if (!force && cachedFG && Date.now() - cachedFG.fetchedAt < CACHE_TTL) {
+      setData(cachedFG.data)
+      setLoading(false)
+      return
+    }
     try {
       setError(false)
       const res = await fetch('/api/fear-greed')
       if (!res.ok) throw new Error('fetch failed')
       const json = await res.json()
       if (json.error) throw new Error(json.error)
+      cachedFG = { data: json, fetchedAt: Date.now() }
       setData(json)
     } catch {
       setError(true)
@@ -150,7 +161,7 @@ export default function FearAndGreed() {
         </h3>
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchData}
+            onClick={() => fetchData(true)}
             className="p-1.5 rounded-lg text-gray-400 hover:text-violet-600 hover:bg-violet-50 transition-all"
           >
             <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
@@ -184,7 +195,7 @@ export default function FearAndGreed() {
       {!loading && error && (
         <div className="flex flex-col items-center justify-center gap-3 py-6">
           <p className="text-sm text-gray-400">Could not load index</p>
-          <button onClick={fetchData} className="btn-primary text-xs px-4 py-2">
+          <button onClick={() => fetchData(true)} className="btn-primary text-xs px-4 py-2">
             Try again
           </button>
         </div>

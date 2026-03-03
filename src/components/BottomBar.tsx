@@ -52,7 +52,7 @@ export default function BottomBar() {
   const [mounted, setMounted] = useState(false)
   useEffect(() => setMounted(true), [])
 
-  const { price, change24h, loading, error, lastUpdated } = useEthPrice(30000)
+  const { price, change24h, loading, error, lastUpdated } = useEthPrice(60_000)
   const isPositive = change24h >= 0
 
   return (

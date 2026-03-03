@@ -4,7 +4,7 @@ import { useWallet }    from '@/contexts/WalletContext'
 import { usePortfolio } from '@/contexts/PortfolioContext'
 import { RefreshCw, TrendingUp, TrendingDown, Zap, ExternalLink, AlertCircle } from 'lucide-react'
 import { SORA } from '@/lib/styles'
-import { fmtUSD } from '@/lib/format'
+import { usePreferences } from '@/contexts/PreferencesContext'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function fmtPct(n: number | null): string {
@@ -28,6 +28,7 @@ function hfConfig(hf: number | null) {
 
 // ─── Badges ───────────────────────────────────────────────────────────────────
 function PnlBadge({ pnl, pnlPct }: { pnl: number | null; pnlPct?: number | null }) {
+  const { fmtValue: fmtUSD } = usePreferences()
   if (pnl === null || pnl === undefined) return null
   const isPos = pnl >= 0
   return (
@@ -94,6 +95,7 @@ function CardSkeleton() {
 
 // ─── Position Cards ───────────────────────────────────────────────────────────
 function LendingCard({ pos }: { pos: any }) {
+  const { fmtValue: fmtUSD } = usePreferences()
   const hf             = hfConfig(pos.healthFactor)
   const supplyItems    = [...(pos.supply ?? []), ...(pos.collateral ?? [])]
   const borrowItems    = pos.borrow ?? []
@@ -185,6 +187,7 @@ function LendingCard({ pos }: { pos: any }) {
 }
 
 function VaultCard({ pos }: { pos: any }) {
+  const { fmtValue: fmtUSD } = usePreferences()
   return (
     <div className="card p-5 hover:shadow-lg transition-all">
       <div className="flex items-start justify-between mb-4">
@@ -228,6 +231,7 @@ function VaultCard({ pos }: { pos: any }) {
 }
 
 function LiquidityCard({ pos }: { pos: any }) {
+  const { fmtValue: fmtUSD } = usePreferences()
   return (
     <div className="card p-5 hover:shadow-lg transition-all">
       <div className="flex items-start justify-between mb-4">
@@ -300,6 +304,7 @@ function SummaryBanner({
   activeProtocols: string[]
   loading:         boolean
 }) {
+  const { fmtValue: fmtUSD } = usePreferences()
   if (loading) {
     return (
       <div className="card p-6">

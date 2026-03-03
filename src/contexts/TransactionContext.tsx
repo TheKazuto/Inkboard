@@ -68,6 +68,12 @@ export function shortenAddr(addr: string): string {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`
 }
 
+// ─── Module-level cache — survives navigation (like PortfolioContext) ────────
+const TX_CACHE_TTL = 2 * 60 * 1000 // 2 minutes
+interface TxCacheEntry { txs: Transaction[]; fetchedAt: number }
+const txCache = new Map<string, TxCacheEntry>()
+let txInflight: Map<string, Promise<Transaction[] | null>> = new Map()
+
 // ─── Provider ─────────────────────────────────────────────────────────────────
 export function TransactionProvider({ children }: { children: ReactNode }) {
   const { address, isConnected } = useWallet()
@@ -77,69 +83,116 @@ export function TransactionProvider({ children }: { children: ReactNode }) {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const lastAddressRef = useRef<string | null>(null)
 
-  const fetchTransactions = useCallback(async (addr: string) => {
-    setStatus('loading')
-    try {
-      const res = await fetch(`/api/transactions?address=${addr}`)
-      if (!res.ok) throw new Error('fetch failed')
-      const data = await res.json()
+  const fetchTransactions = useCallback(async (addr: string, force = false) => {
+    const key = addr.toLowerCase()
 
-      if (data.error === 'no_api_key') {
-        setStatus('no_api_key')
+    // Serve from cache if fresh
+    if (!force) {
+      const cached = txCache.get(key)
+      if (cached && Date.now() - cached.fetchedAt < TX_CACHE_TTL) {
+        setTransactions(cached.txs)
+        setLastUpdated(new Date(cached.fetchedAt))
+        setStatus(cached.txs.length > 0 ? 'success' : 'idle')
         return
       }
-      if (data.error) throw new Error(data.error)
-
-      const enriched: Transaction[] = (data.transactions ?? [])
-        .map((tx: Transaction) => ({
-          ...tx,
-          type: classifyType(tx, addr),
-        }))
-        // Deduplicate by hash (keep first occurrence)
-        .filter((tx: Transaction, i: number, arr: Transaction[]) => arr.findIndex((t: Transaction) => t.hash === tx.hash) === i)
-        // Always sort newest first — stable order, never shuffles on re-render
-        .sort((a: Transaction, b: Transaction) => b.timestamp - a.timestamp)
-
-      setTransactions(enriched)
-      setLastUpdated(new Date())
-      setStatus('success')
-    } catch {
-      setStatus('error')
     }
+
+    // Deduplicate in-flight requests
+    if (txInflight.has(key)) {
+      const result = await txInflight.get(key)
+      if (result) {
+        setTransactions(result)
+        setStatus('success')
+      }
+      return
+    }
+
+    setStatus('loading')
+    const promise = (async (): Promise<Transaction[] | null> => {
+      try {
+        const res = await fetch(`/api/transactions?address=${addr}`)
+        if (!res.ok) throw new Error('fetch failed')
+        const data = await res.json()
+
+        if (data.error === 'no_api_key') {
+          setStatus('no_api_key')
+          return null
+        }
+        if (data.error) throw new Error(data.error)
+
+        const enriched: Transaction[] = (data.transactions ?? [])
+          .map((tx: Transaction) => ({
+            ...tx,
+            type: classifyType(tx, addr),
+          }))
+          .filter((tx: Transaction, i: number, arr: Transaction[]) => arr.findIndex((t: Transaction) => t.hash === tx.hash) === i)
+          .sort((a: Transaction, b: Transaction) => b.timestamp - a.timestamp)
+
+        txCache.set(key, { txs: enriched, fetchedAt: Date.now() })
+        setTransactions(enriched)
+        setLastUpdated(new Date())
+        setStatus('success')
+        return enriched
+      } catch {
+        setStatus('error')
+        return null
+      } finally {
+        txInflight.delete(key)
+      }
+    })()
+
+    txInflight.set(key, promise)
+    await promise
   }, [])
 
   const refresh = useCallback(() => {
     if (!address) return
-    // Reset the auto-refresh timer so it doesn't fire immediately after a manual refresh
     if (intervalRef.current) clearInterval(intervalRef.current)
-    fetchTransactions(address)
-    intervalRef.current = setInterval(() => fetchTransactions(address), 120_000)
+    fetchTransactions(address, true)
+    intervalRef.current = setInterval(() => {
+      // Only poll when tab is visible
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        fetchTransactions(address)
+      }
+    }, 120_000)
   }, [address, fetchTransactions])
 
   useEffect(() => {
-    // Clear interval on any change
     if (intervalRef.current) clearInterval(intervalRef.current)
 
     if (!isConnected || !address) {
-      setTransactions([])
-      setStatus('idle')
-      setLastUpdated(null)
+      // Keep cached data for instant restore — only clear if different address
+      if (!address || lastAddressRef.current !== address) {
+        setTransactions([])
+        setStatus('idle')
+        setLastUpdated(null)
+      }
       lastAddressRef.current = null
       return
     }
 
-    // Reset if wallet changed
+    // Seed from cache immediately while fetching fresh data
+    const cached = txCache.get(address.toLowerCase())
     if (lastAddressRef.current !== address) {
-      setTransactions([])
-      setStatus('idle')
+      if (cached) {
+        setTransactions(cached.txs)
+        setLastUpdated(new Date(cached.fetchedAt))
+        setStatus('success')
+      } else {
+        setTransactions([])
+        setStatus('idle')
+      }
       lastAddressRef.current = address
     }
 
-    // Initial fetch
     fetchTransactions(address)
 
-    // Auto-refresh every 2 minutes
-    intervalRef.current = setInterval(() => fetchTransactions(address), 120_000)
+    // Auto-refresh every 2 minutes (only when tab is visible)
+    intervalRef.current = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        fetchTransactions(address)
+      }
+    }, 120_000)
 
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)

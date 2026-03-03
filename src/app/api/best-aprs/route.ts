@@ -91,7 +91,6 @@ async function rpcBatch(calls: BatchCall[], gas?: string): Promise<BatchResult[]
           ok++
         }
       }
-      console.log(`[best-aprs] RPC batch via ${rpc}: ${ok}/${calls.length} success`)
       return results
     } catch { continue }
   }
@@ -118,7 +117,6 @@ async function sequentialFallback(calls: BatchCall[], gas?: string): Promise<Bat
 // ─── Gauge emissions: Voter.gauges(pool) → Gauge.rewardRate() ───────────────
 async function fetchGaugeEmissions(poolAddresses: string[]): Promise<Map<string, number>> {
   const emissions = new Map<string, number>()
-  console.log(`[best-aprs] Fetching gauges for ${poolAddresses.length} pools...`)
 
   const gaugeResults = await rpcBatch(poolAddresses.map(pool => ({
     to: VOTER_INK,
@@ -134,7 +132,6 @@ async function fetchGaugeEmissions(poolAddresses: string[]): Promise<Map<string,
       if (gauge && gauge !== ZERO) poolGauges.push({ pool: poolAddresses[i], gauge })
     } catch { /* skip */ }
   }
-  console.log(`[best-aprs] Found ${poolGauges.length} active gauges out of ${poolAddresses.length} pools`)
   if (poolGauges.length === 0) return emissions
 
   const rateResults = await rpcBatch(poolGauges.map(pg => ({
@@ -150,7 +147,6 @@ async function fetchGaugeEmissions(poolAddresses: string[]): Promise<Map<string,
       if (rate > 0n) { emissions.set(poolGauges[i].pool.toLowerCase(), Number(rate) / 1e18); withRewards++ }
     } catch { /* skip */ }
   }
-  console.log(`[best-aprs] Gauge emissions: ${withRewards} gauges with active rewards`)
   return emissions
 }
 
@@ -160,17 +156,16 @@ async function fetchVeloPrice(): Promise<number> {
     const res = await fetch(`${GECKO_BASE}/simple/networks/ink/token_price/${XVELO_INK}`, { signal: AbortSignal.timeout(8_000), headers: { Accept: 'application/json' } })
     if (res.ok) {
       const price = parseFloat((await res.json())?.data?.attributes?.token_prices?.[XVELO_INK.toLowerCase()] ?? '0')
-      if (price > 0) { console.log(`[best-aprs] VELO price: $${price} (GeckoTerminal)`); return price }
+      if (price > 0) { return price }
     }
   } catch { /* fall through */ }
   try {
     const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=velodrome-finance&vs_currencies=usd', { signal: AbortSignal.timeout(8_000) })
     if (res.ok) {
       const price = (await res.json())?.['velodrome-finance']?.usd ?? 0
-      if (price > 0) { console.log(`[best-aprs] VELO price: $${price} (CoinGecko)`); return price }
+      if (price > 0) { return price }
     }
   } catch { /* skip */ }
-  console.log(`[best-aprs] WARNING: VELO price unavailable`)
   return 0
 }
 
@@ -221,7 +216,6 @@ async function fetchGeckoPools(): Promise<GeckoPool[]> {
       out.push({ address: addr, base, quote, tvl, vol24h, isCL, isStable: pairIsStable, feeApr })
     }
   }
-  console.log(`[best-aprs] GeckoTerminal: ${out.length} Velodrome pools`)
   return out
 }
 
@@ -234,9 +228,8 @@ async function fetchVelodromeData(): Promise<AprEntry[]> {
 
   let emissions = new Map<string, number>()
   try { emissions = await fetchGaugeEmissions(geckoPools.map(g => g.address)) }
-  catch (e) { console.log(`[best-aprs] Gauge emissions failed: ${e}`) }
+  catch (e) { console.error('[best-aprs] Gauge emissions failed:', e) }
 
-  console.log(`[best-aprs] Computing APR: ${geckoPools.length} pools, VELO=$${veloPrice}, ${emissions.size} with gauges`)
 
   const out: AprEntry[] = []
   for (const g of geckoPools) {
@@ -257,8 +250,6 @@ async function fetchVelodromeData(): Promise<AprEntry[]> {
   }
 
   const sorted = [...out].sort((a, b) => b.apr - a.apr)
-  for (const s of sorted.slice(0, 5)) console.log(`[best-aprs] → ${s.label}: APR=${s.apr}% (tvl=$${s.tvl.toFixed(0)})`)
-  console.log(`[best-aprs] Velodrome: ${out.length} pools (${emissions.size} with emission APR)`)
   return out
 }
 
@@ -271,7 +262,7 @@ async function fetchInkySwapData(): Promise<AprEntry[]> {
       signal: AbortSignal.timeout(12_000),
       headers: { Accept: 'application/json' },
     })
-    if (!res.ok) { console.log(`[best-aprs] InkySwap API HTTP ${res.status}`); return out }
+    if (!res.ok) { return out }
     const data = await res.json()
     const pairs: any[] = Array.isArray(data) ? data : (data?.pairs ?? data?.data ?? [])
 
@@ -304,8 +295,6 @@ async function fetchInkySwapData(): Promise<AprEntry[]> {
     }
 
     const sorted = [...out].sort((a, b) => b.apr - a.apr)
-    for (const s of sorted.slice(0, 3)) console.log(`[best-aprs] → InkySwap ${s.label}: APR=${s.apr}% (tvl=$${s.tvl.toFixed(0)})`)
-    console.log(`[best-aprs] InkySwap: ${out.length} pools from ${pairs.length} pairs`)
   } catch (e) { console.error('[best-aprs] InkySwap error:', e) }
   return out
 }
@@ -324,7 +313,6 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
     const target = pools.filter((p: any) =>
       p.chain?.toLowerCase() === 'ink' && LLAMA_SLUGS.has(p.project)
     )
-    console.log(`[best-aprs] DefiLlama: ${target.length} Tydro+Curve pools on Ink (from ${pools.length} total)`)
 
     for (const p of target) {
       const project = p.project ?? '', symbol = p.symbol ?? ''
@@ -360,7 +348,6 @@ async function fetchAllAprs(): Promise<AprEntry[]> {
   if (i.status === 'rejected') console.error('[best-aprs] InkySwap failed:', i.reason)
   if (l.status === 'rejected') console.error('[best-aprs] DefiLlama failed:', l.reason)
   const all = [...velo, ...inky, ...llama]
-  console.log(`[best-aprs] Total: ${all.length} entries (${velo.length} Velodrome + ${inky.length} InkySwap + ${llama.length} DefiLlama)`)
   all.sort((a, b) => b.apr - a.apr || b.tvl - a.tvl)
   return all
 }

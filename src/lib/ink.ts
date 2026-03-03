@@ -145,33 +145,57 @@ export const KNOWN_TOKENS: KnownToken[] = [
 
 // ─── ETH price (shared, cached) ───────────────────────────────────────────────
 
-interface PriceEntry {
-  price:     number
+export interface EthPriceData {
+  price:        number
+  change24h:    number
+  changeAmount: number
+}
+
+interface PriceEntry extends EthPriceData {
   fetchedAt: number
 }
 
 const ETH_PRICE_TTL = 60_000 // 60 seconds
 let ethPriceCache: PriceEntry | null = null
+let ethPriceInflight: Promise<EthPriceData> | null = null
 
 /**
- * Fetch the current ETH/USD price from CoinGecko.
+ * Fetch the current ETH/USD price + 24h change from CoinGecko.
  * Results are cached for 60 seconds so concurrent route handlers share one upstream call.
+ * In-flight deduplication prevents parallel CoinGecko requests.
  */
-export async function getEthPrice(): Promise<number> {
+export async function getEthPriceData(): Promise<EthPriceData> {
   const now = Date.now()
   if (ethPriceCache && now - ethPriceCache.fetchedAt < ETH_PRICE_TTL) {
-    return ethPriceCache.price
+    return ethPriceCache
   }
-  try {
-    const res = await fetch(
-      'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd',
-      { next: { revalidate: 60 } },
-    )
-    const d     = await res.json()
-    const price = (d?.ethereum?.usd as number) ?? 0
-    ethPriceCache = { price, fetchedAt: now }
-    return price
-  } catch {
-    return ethPriceCache?.price ?? 0
-  }
+  if (ethPriceInflight) return ethPriceInflight
+
+  ethPriceInflight = (async () => {
+    try {
+      const res = await fetch(
+        'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd&include_24hr_change=true',
+        { next: { revalidate: 60 } },
+      )
+      const d         = await res.json()
+      const price     = (d?.ethereum?.usd as number) ?? 0
+      const change24h = (d?.ethereum?.usd_24h_change as number) ?? 0
+      const prevPrice = price / (1 + change24h / 100)
+      const data: EthPriceData = { price, change24h, changeAmount: price - prevPrice }
+      ethPriceCache = { ...data, fetchedAt: Date.now() }
+      return data
+    } catch {
+      if (ethPriceCache) return ethPriceCache
+      return { price: 0, change24h: 0, changeAmount: 0 }
+    } finally {
+      ethPriceInflight = null
+    }
+  })()
+
+  return ethPriceInflight
+}
+
+/** Convenience wrapper — returns just the price number. */
+export async function getEthPrice(): Promise<number> {
+  return (await getEthPriceData()).price
 }

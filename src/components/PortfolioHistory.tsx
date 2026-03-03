@@ -1,7 +1,7 @@
 'use client'
 import { cachedFetch, getCached } from '@/lib/dataCache'
 import { SORA } from '@/lib/styles'
-import { fmtUSD, fmtYAxis } from '@/lib/format'
+import { fmtYAxis } from '@/lib/format'
 
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useWallet }      from '@/contexts/WalletContext'
@@ -41,13 +41,14 @@ function tickInterval(length: number, range: Range) {
 
 // ─── Custom Tooltip ───────────────────────────────────────────────────────────
 function CustomTooltip({ active, payload, label }: any) {
+  const { fmtValue } = usePreferences()
   if (!active || !payload?.length) return null
   return (
     <div className="bg-white border border-gray-100 rounded-xl shadow-lg px-3 py-2 text-xs">
       <p className="text-gray-400 mb-0.5">
         {new Date(label).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}
       </p>
-      <p className="font-bold text-violet-700">{fmtUSD(payload[0].value)}</p>
+      <p className="font-bold text-violet-700">{fmtValue(payload[0].value)}</p>
     </div>
   )
 }
@@ -81,7 +82,7 @@ function Skeleton({ onRefresh }: { onRefresh?: () => void }) {
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function PortfolioHistory() {
   const { address, stableAddress, isConnected } = useWallet()
-  const { defaultRange } = usePreferences()
+  const { defaultRange, fmtValue } = usePreferences()
   const [range, setRange] = useState<Range>(defaultRange)
   // Sync range when the user changes their preferred default in Account settings
   const prevDefaultRange = useRef(defaultRange)
@@ -224,7 +225,7 @@ export default function PortfolioHistory() {
                 {isPositive ? '+' : ''}{current.change.toFixed(2)}% in period
               </span>
               {current.totalValue > 0 && (
-                <span className="text-gray-400 ml-1 text-xs">· {fmtUSD(current.totalValue)}</span>
+                <span className="text-gray-400 ml-1 text-xs">· {fmtValue(current.totalValue)}</span>
               )}
             </div>
           )}

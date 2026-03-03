@@ -17,6 +17,10 @@ interface Token {
   total_volume: number
 }
 
+// Module-level cache — survives navigation without re-fetching
+const CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+let cachedTokens: { data: Token[]; fetchedAt: number } | null = null
+
 function formatPrice(price: number): string {
   if (price === 0 || price === null) return '$0.00'
   if (price < 0.000001) return `$${price.toExponential(2)}`
@@ -28,18 +32,28 @@ function formatPrice(price: number): string {
 }
 
 export default function TopTokens() {
-  const [tokens, setTokens] = useState<Token[]>([])
-  const [loading, setLoading] = useState(true)
+  const [tokens, setTokens] = useState<Token[]>(() => cachedTokens?.data ?? [])
+  const [loading, setLoading] = useState(!cachedTokens)
   const [error, setError] = useState(false)
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(
+    cachedTokens ? new Date(cachedTokens.fetchedAt) : null,
+  )
 
-  const fetchTokens = async () => {
+  const fetchTokens = async (force = false) => {
+    // Serve from cache if fresh and not forced
+    if (!force && cachedTokens && Date.now() - cachedTokens.fetchedAt < CACHE_TTL) {
+      setTokens(cachedTokens.data)
+      setLastUpdated(new Date(cachedTokens.fetchedAt))
+      setLoading(false)
+      return
+    }
     try {
       setError(false)
       const res = await fetch('/api/top-tokens')
       if (!res.ok) throw new Error('fetch failed')
       const data = await res.json()
       if (Array.isArray(data) && data.length > 0) {
+        cachedTokens = { data, fetchedAt: Date.now() }
         setTokens(data)
         setLastUpdated(new Date())
       } else {
@@ -54,8 +68,6 @@ export default function TopTokens() {
 
   useEffect(() => {
     fetchTokens()
-    // No polling — /api/top-tokens has revalidate=60 server-side cache.
-    // Data refreshes on next page visit or via the manual refresh button.
   }, [])
 
   return (
@@ -76,7 +88,7 @@ export default function TopTokens() {
           )}
         </div>
         <button
-          onClick={fetchTokens}
+          onClick={() => fetchTokens(true)}
           className="p-1.5 rounded-lg text-gray-400 hover:text-violet-600 hover:bg-violet-50 transition-all"
           title="Refresh"
         >
@@ -105,7 +117,7 @@ export default function TopTokens() {
         <div className="text-center py-8">
           <p className="text-sm text-gray-400 mb-3">Could not load token data</p>
           <button
-            onClick={fetchTokens}
+            onClick={() => fetchTokens(true)}
             className="btn-primary text-xs px-4 py-2"
           >
             Try again

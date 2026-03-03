@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { INK_RPC, rpcBatch, getEthPrice } from '@/lib/ink'
+import { INK_RPC, rpcBatch } from '@/lib/ink'
 
 export const revalidate = 0
 
