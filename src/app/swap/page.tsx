@@ -820,12 +820,18 @@ export default function SwapPage() {
     try {
       const big = BigInt(quote.estimate.toAmount)
       const dec = toToken.decimals ?? 18
-      const divisor = BigInt(10 ** Math.max(0, dec - 8))
-      const human = Number(big / divisor) / 1e8
+      // Use weiToHuman-style string math for precision
+      const weiStr = big.toString()
+      const padded = weiStr.padStart(dec + 1, '0')
+      const intPart = padded.slice(0, padded.length - dec) || '0'
+      const fracPart = padded.slice(padded.length - dec).slice(0, 6).replace(/0+$/, '')
+      const display = fracPart ? `${intPart}.${fracPart}` : intPart
+      const human = parseFloat(display)
       if (human >= 1000)  return human.toLocaleString('en-US', { maximumFractionDigits: 2 })
       if (human >= 1)     return human.toFixed(4)
       if (human >= 0.001) return human.toFixed(6)
-      return human.toExponential(4)
+      if (human > 0)      return human.toExponential(4)
+      return '0'
     } catch { return '0' }
   }, [quote, toToken.decimals])
 
