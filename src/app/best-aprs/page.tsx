@@ -182,10 +182,10 @@ function categorize(entries: AprEntry[]): AprData {
   const lends: AprEntry[] = []
 
   for (const e of entries) {
-    if (e.isStable) stableAPRs.push(e)
+    if (e.isStable) { stableAPRs.push(e); continue }
     if (e.type === 'pool')  pools.push(e)
-    if (e.type === 'vault') vaults.push(e)
-    if (e.type === 'lend')  lends.push(e)
+    else if (e.type === 'vault') vaults.push(e)
+    else if (e.type === 'lend')  lends.push(e)
   }
 
   return {
