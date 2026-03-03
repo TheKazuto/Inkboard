@@ -303,6 +303,8 @@ let sugarAbiCache: Abi | null = null
 
 async function getSugarAbi(): Promise<Abi> {
   if (sugarAbiCache) return sugarAbiCache
+
+  // Try Blockscout etherscan-compatible API
   try {
     const res = await fetch(
       `${BLOCKSCOUT}/api?module=contract&action=getabi&address=${LP_SUGAR}`,
@@ -311,13 +313,28 @@ async function getSugarAbi(): Promise<Abi> {
     const json = await res.json()
     if (json.status === '1' && json.result) {
       sugarAbiCache = JSON.parse(json.result) as Abi
-      console.log(`[best-aprs] Sugar ABI from Blockscout (${(sugarAbiCache as any[]).length} entries)`)
+      console.log(`[best-aprs] Sugar ABI from Blockscout v1 (${(sugarAbiCache as any[]).length} entries)`)
       return sugarAbiCache
     }
-    console.log(`[best-aprs] Blockscout ABI unavailable — using hardcoded ABI`)
-  } catch (e) {
-    console.log(`[best-aprs] Blockscout ABI error — using hardcoded ABI`)
-  }
+  } catch {}
+
+  // Try Blockscout v2 API (sometimes has ABI even when v1 doesn't)
+  try {
+    const res = await fetch(
+      `${BLOCKSCOUT}/api/v2/smart-contracts/${LP_SUGAR}`,
+      { signal: AbortSignal.timeout(8_000) }
+    )
+    if (res.ok) {
+      const json = await res.json()
+      if (json.abi && Array.isArray(json.abi) && json.abi.length > 0) {
+        sugarAbiCache = json.abi as Abi
+        console.log(`[best-aprs] Sugar ABI from Blockscout v2 (${json.abi.length} entries)`)
+        return sugarAbiCache
+      }
+    }
+  } catch {}
+
+  console.log(`[best-aprs] Blockscout ABI unavailable — using hardcoded ABI`)
   sugarAbiCache = HARDCODED_ABI
   return HARDCODED_ABI
 }
@@ -346,32 +363,52 @@ async function fetchSugarPools(): Promise<SugarPool[]> {
     throw new Error(`Failed to encode Sugar.all(): ${e}`)
   }
 
-  // eth_call with fallback RPC
+  console.log(`[best-aprs] Sugar calldata: ${calldata.slice(0, 10)}... (${calldata.length} chars)`)
+
+  // eth_call with gas limit and fallback RPC
+  // View functions on complex Vyper contracts need high gas limit
   let rpcResult: `0x${string}` | null = null
-  for (const rpc of [INK_RPC, INK_RPC_ALT]) {
-    try {
-      const res = await fetch(rpc, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0', id: 1,
-          method: 'eth_call',
-          params: [{ to: LP_SUGAR, data: calldata }, 'latest'],
-        }),
-        signal: AbortSignal.timeout(30_000),
-      })
-      const json = await res.json()
-      if (json.error) {
-        console.log(`[best-aprs] Sugar RPC error (${rpc}): ${json.error.message}`)
-        continue
+
+  // Try different batch sizes (200, then 50 if it fails)
+  for (const limit of [200n, 50n]) {
+    if (rpcResult) break
+
+    const cd = limit === 200n ? calldata : encodeFunctionData({ abi, functionName: 'all', args: [limit, 0n] })
+
+    for (const rpc of [INK_RPC, INK_RPC_ALT]) {
+      try {
+        const res = await fetch(rpc, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 1,
+            method: 'eth_call',
+            params: [{
+              to: LP_SUGAR,
+              data: cd,
+              gas: '0x5F5E100',    // 100M gas — complex Vyper view functions need lots
+            }, 'latest'],
+          }),
+          signal: AbortSignal.timeout(30_000),
+        })
+        const json = await res.json()
+        if (json.error) {
+          const msg = json.error.message ?? JSON.stringify(json.error)
+          console.log(`[best-aprs] Sugar RPC error (${rpc}, limit=${limit}): ${msg}`)
+          // Log error data if present (revert reason)
+          if (json.error.data) {
+            console.log(`[best-aprs] Revert data: ${String(json.error.data).slice(0, 200)}`)
+          }
+          continue
+        }
+        if (json.result && json.result !== '0x') {
+          rpcResult = json.result as `0x${string}`
+          console.log(`[best-aprs] Sugar RPC OK via ${rpc} (limit=${limit}, ${rpcResult.length} hex chars)`)
+          break
+        }
+      } catch (e) {
+        console.log(`[best-aprs] Sugar RPC fail (${rpc}, limit=${limit}):`, e)
       }
-      if (json.result && json.result !== '0x') {
-        rpcResult = json.result as `0x${string}`
-        console.log(`[best-aprs] Sugar RPC OK via ${rpc} (${rpcResult.length} hex chars)`)
-        break
-      }
-    } catch (e) {
-      console.log(`[best-aprs] Sugar RPC fail (${rpc}):`, e)
     }
   }
 
