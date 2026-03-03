@@ -227,18 +227,17 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
   return out
 }
 
-// ─── LpSugar on-chain API for Velodrome on Ink ───────────────────────────────
-// Sugar is Velodrome's on-chain data contract. It returns pool info including
-// `emissions` (VELO per second per gauge), but NOT APR directly.
-// We compute Emission APR = (emissions × VELO_price × 86400 × 365 / TVL) × 100
+// ─── Direct Gauge RPC calls for Velodrome emissions on Ink ──────────────────
+// Instead of Sugar (complex Vyper view that reverts), we call individual
+// contracts: Voter.gauges(pool) → gauge address, Gauge.rewardRate() → emissions/sec.
+// These are simple single-slot reads that always work.
 //
-// Contract: 0x46e07c9b4016f8E5c3cD0b2fd20147A4d0972120 (Ink chain 57073)
-// Source: https://github.com/velodrome-finance/sugar
+// Voter (SuperchainLeafVoter on Ink): 0x97cDBCe21B6fd0585d29E539B1B99dAd328a1123
+// Source: https://github.com/velodrome-finance/indexer/blob/main/config.yaml
 
-const LP_SUGAR     = '0x46e07c9b4016f8E5c3cD0b2fd20147A4d0972120' as const
+const VOTER_INK    = '0x97cDBCe21B6fd0585d29E539B1B99dAd328a1123' as const
 const INK_RPC      = 'https://rpc-gel.inkonchain.com'
 const INK_RPC_ALT  = 'https://ink.drpc.org'
-const BLOCKSCOUT   = 'https://explorer.inkonchain.com'
 const VELO_URL     = 'https://velodrome.finance/liquidity?chain=57073'
 const GECKO_BASE   = 'https://api.geckoterminal.com/api/v2'
 const SECONDS_YEAR = 86400 * 365
@@ -252,233 +251,178 @@ const VELO_DEX_IDS = [
 // xVELO on Ink — the emissions token
 const XVELO_INK = '0x7f9AdFbd38b669F03d1d11000Bc76b9AaEA28A81'
 
-// ─── Hardcoded ABI for LpSugar.all() ─────────────────────────────────────────
-// Built from the official Sugar README Lp struct (32 fields).
-// Fallback if Blockscout ABI fetch fails (Vyper contracts often unverified).
-const LP_TUPLE_COMPONENTS = [
-  { name: 'lp',              type: 'address'  },
-  { name: 'symbol',          type: 'string'   },
-  { name: 'decimals',        type: 'uint8'    },
-  { name: 'liquidity',       type: 'uint256'  },
-  { name: 'type',            type: 'int24'    },
-  { name: 'tick',            type: 'int24'    },
-  { name: 'sqrt_ratio',      type: 'uint160'  },
-  { name: 'token0',          type: 'address'  },
-  { name: 'reserve0',        type: 'uint256'  },
-  { name: 'staked0',         type: 'uint256'  },
-  { name: 'token1',          type: 'address'  },
-  { name: 'reserve1',        type: 'uint256'  },
-  { name: 'staked1',         type: 'uint256'  },
-  { name: 'gauge',           type: 'address'  },
-  { name: 'gauge_liquidity', type: 'uint256'  },
-  { name: 'gauge_alive',     type: 'bool'     },
-  { name: 'fee',             type: 'address'  },
-  { name: 'bribe',           type: 'address'  },
-  { name: 'factory',         type: 'address'  },
-  { name: 'emissions',       type: 'uint256'  },
-  { name: 'emissions_token', type: 'address'  },
-  { name: 'emissions_cap',   type: 'uint256'  },
-  { name: 'pool_fee',        type: 'uint256'  },
-  { name: 'unstaked_fee',    type: 'uint256'  },
-  { name: 'token0_fees',     type: 'uint256'  },
-  { name: 'token1_fees',     type: 'uint256'  },
-  { name: 'locked',          type: 'uint256'  },
-  { name: 'emerging',        type: 'bool'     },
-  { name: 'created_at',      type: 'uint256'  },
-  { name: 'nfpm',            type: 'address'  },
-  { name: 'alm',             type: 'address'  },
-  { name: 'root',            type: 'address'  },
-] as const
-
-const HARDCODED_ABI: Abi = [{
-  name: 'all',
+// ABI for individual contract calls (minimal — no complex structs)
+const VOTER_ABI: Abi = [{
+  name: 'gauges',
   type: 'function',
   stateMutability: 'view',
-  inputs:  [{ name: '_limit', type: 'uint256' }, { name: '_offset', type: 'uint256' }],
-  outputs: [{ name: '', type: 'tuple[]', components: LP_TUPLE_COMPONENTS as any }],
+  inputs:  [{ name: '_pool', type: 'address' }],
+  outputs: [{ name: '', type: 'address' }],
+}, {
+  name: 'isAlive',
+  type: 'function',
+  stateMutability: 'view',
+  inputs:  [{ name: '_gauge', type: 'address' }],
+  outputs: [{ name: '', type: 'bool' }],
 }]
 
-// ─── ABI cache ───────────────────────────────────────────────────────────────
-let sugarAbiCache: Abi | null = null
+const GAUGE_ABI: Abi = [{
+  name: 'rewardRate',
+  type: 'function',
+  stateMutability: 'view',
+  inputs:  [],
+  outputs: [{ name: '', type: 'uint256' }],
+}]
 
-async function getSugarAbi(): Promise<Abi> {
-  if (sugarAbiCache) return sugarAbiCache
+const ZERO_ADDR = '0x0000000000000000000000000000000000000000'
 
-  // Try Blockscout etherscan-compatible API
-  try {
-    const res = await fetch(
-      `${BLOCKSCOUT}/api?module=contract&action=getabi&address=${LP_SUGAR}`,
-      { signal: AbortSignal.timeout(8_000) }
-    )
-    const json = await res.json()
-    if (json.status === '1' && json.result) {
-      sugarAbiCache = JSON.parse(json.result) as Abi
-      console.log(`[best-aprs] Sugar ABI from Blockscout v1 (${(sugarAbiCache as any[]).length} entries)`)
-      return sugarAbiCache
-    }
-  } catch {}
+// ─── JSON-RPC batch helper ──────────────────────────────────────────────────
+async function rpcBatch(
+  calls: { to: string; data: `0x${string}` }[],
+): Promise<(`0x${string}` | null)[]> {
+  if (calls.length === 0) return []
 
-  // Try Blockscout v2 API (sometimes has ABI even when v1 doesn't)
-  try {
-    const res = await fetch(
-      `${BLOCKSCOUT}/api/v2/smart-contracts/${LP_SUGAR}`,
-      { signal: AbortSignal.timeout(8_000) }
-    )
-    if (res.ok) {
-      const json = await res.json()
-      if (json.abi && Array.isArray(json.abi) && json.abi.length > 0) {
-        sugarAbiCache = json.abi as Abi
-        console.log(`[best-aprs] Sugar ABI from Blockscout v2 (${json.abi.length} entries)`)
-        return sugarAbiCache
-      }
-    }
-  } catch {}
+  const batch = calls.map((c, i) => ({
+    jsonrpc: '2.0',
+    id: i + 1,
+    method: 'eth_call',
+    params: [{ to: c.to, data: c.data }, 'latest'],
+  }))
 
-  console.log(`[best-aprs] Blockscout ABI unavailable — using hardcoded ABI`)
-  sugarAbiCache = HARDCODED_ABI
-  return HARDCODED_ABI
-}
-
-// ─── Raw pool data from Sugar (emissions, not APR) ───────────────────────────
-interface SugarPool {
-  symbol: string
-  base: string
-  quote: string
-  isCL: boolean
-  isStable: boolean
-  emissions: bigint        // VELO per second (18 decimals)
-  emissionsToken: string
-  gaugeAlive: boolean
-  poolType: number
-}
-
-async function fetchSugarPools(): Promise<SugarPool[]> {
-  const abi = await getSugarAbi()
-
-  // Encode calldata
-  let calldata: `0x${string}`
-  try {
-    calldata = encodeFunctionData({ abi, functionName: 'all', args: [200n, 0n] })
-  } catch (e) {
-    throw new Error(`Failed to encode Sugar.all(): ${e}`)
-  }
-
-  console.log(`[best-aprs] Sugar calldata: ${calldata.slice(0, 10)}... (${calldata.length} chars)`)
-
-  // eth_call with gas limit and fallback RPC
-  // View functions on complex Vyper contracts need high gas limit
-  let rpcResult: `0x${string}` | null = null
-
-  // Try different batch sizes (200, then 50 if it fails)
-  for (const limit of [200n, 50n]) {
-    if (rpcResult) break
-
-    const cd = limit === 200n ? calldata : encodeFunctionData({ abi, functionName: 'all', args: [limit, 0n] })
-
-    for (const rpc of [INK_RPC, INK_RPC_ALT]) {
-      try {
-        const res = await fetch(rpc, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0', id: 1,
-            method: 'eth_call',
-            params: [{
-              to: LP_SUGAR,
-              data: cd,
-              gas: '0x5F5E100',    // 100M gas — complex Vyper view functions need lots
-            }, 'latest'],
-          }),
-          signal: AbortSignal.timeout(30_000),
-        })
-        const json = await res.json()
-        if (json.error) {
-          const msg = json.error.message ?? JSON.stringify(json.error)
-          console.log(`[best-aprs] Sugar RPC error (${rpc}, limit=${limit}): ${msg}`)
-          // Log error data if present (revert reason)
-          if (json.error.data) {
-            console.log(`[best-aprs] Revert data: ${String(json.error.data).slice(0, 200)}`)
-          }
-          continue
-        }
-        if (json.result && json.result !== '0x') {
-          rpcResult = json.result as `0x${string}`
-          console.log(`[best-aprs] Sugar RPC OK via ${rpc} (limit=${limit}, ${rpcResult.length} hex chars)`)
-          break
-        }
-      } catch (e) {
-        console.log(`[best-aprs] Sugar RPC fail (${rpc}, limit=${limit}):`, e)
-      }
-    }
-  }
-
-  if (!rpcResult) throw new Error('All RPC endpoints failed for Sugar')
-
-  // Decode
-  let rawPools: readonly any[]
-  try {
-    const decoded = decodeFunctionResult({ abi, functionName: 'all', data: rpcResult })
-    rawPools = Array.isArray(decoded) ? decoded : [decoded]
-    if (rawPools.length === 1 && Array.isArray(rawPools[0])) rawPools = rawPools[0]
-  } catch (e) {
-    throw new Error(`Sugar decode failed: ${e}`)
-  }
-
-  console.log(`[best-aprs] Sugar: ${rawPools.length} raw pools decoded`)
-
-  // Debug first pool
-  if (rawPools.length > 0) {
-    const f = rawPools[0] as any
-    const named = typeof f === 'object' ? Object.keys(f).filter((k: string) => isNaN(Number(k))) : []
-    console.log(`[best-aprs] Pool keys: ${named.slice(0, 12).join(', ')}`)
-    console.log(`[best-aprs] First: symbol=${f?.symbol}, emissions=${f?.emissions}, gauge_alive=${f?.gauge_alive}`)
-  }
-
-  // Parse
-  const out: SugarPool[] = []
-  for (const p of rawPools) {
+  for (const rpc of [INK_RPC, INK_RPC_ALT]) {
     try {
-      const pool = p as any
-      const symbol = String(pool.symbol ?? '')
-      if (!symbol) continue
-
-      const match = symbol.match(/^(?:vAMM|sAMM|CL\d+)-(.+)\/(.+)$/)
-      let base: string, quote: string
-      if (match) {
-        base = match[1].trim()
-        quote = match[2].trim()
-      } else {
-        const slashIdx = symbol.indexOf('/')
-        if (slashIdx === -1) continue
-        const dashIdx = symbol.indexOf('-')
-        base = (dashIdx >= 0 ? symbol.slice(dashIdx + 1, slashIdx) : symbol.slice(0, slashIdx)).trim()
-        quote = symbol.slice(slashIdx + 1).trim()
-      }
-      if (!base || !quote) continue
-
-      const isCL = symbol.startsWith('CL')
-      const poolTypeVal = Number(pool.type ?? 0)
-      const isStable = symbol.startsWith('sAMM') || poolTypeVal === -1 || allStable([base, quote])
-
-      out.push({
-        symbol, base, quote, isCL, isStable,
-        emissions:      BigInt(pool.emissions?.toString() ?? '0'),
-        emissionsToken: String(pool.emissions_token ?? ''),
-        gaugeAlive:     Boolean(pool.gauge_alive),
-        poolType:       poolTypeVal,
+      const res = await fetch(rpc, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(batch),
+        signal: AbortSignal.timeout(15_000),
       })
+      const results = await res.json()
+
+      // Handle non-batch response (some RPCs don't support batching)
+      if (!Array.isArray(results)) {
+        console.log(`[best-aprs] RPC ${rpc} returned non-batch response, falling back to sequential`)
+        return sequentialRpc(calls, rpc)
+      }
+
+      // Sort by id to match input order
+      const sorted = results.sort((a: any, b: any) => a.id - b.id)
+      const out = sorted.map((r: any) => {
+        if (r.error || !r.result || r.result === '0x') return null
+        return r.result as `0x${string}`
+      })
+
+      console.log(`[best-aprs] RPC batch OK via ${rpc}: ${out.filter(Boolean).length}/${calls.length} success`)
+      return out
     } catch (e) {
-      console.log(`[best-aprs] Sugar pool parse error:`, e)
+      console.log(`[best-aprs] RPC batch fail (${rpc}):`, e)
     }
   }
 
-  console.log(`[best-aprs] Sugar: ${out.length} pools (${out.filter(p => p.emissions > 0n).length} with emissions)`)
+  return calls.map(() => null)
+}
+
+async function sequentialRpc(
+  calls: { to: string; data: `0x${string}` }[],
+  rpc: string,
+): Promise<(`0x${string}` | null)[]> {
+  const out: (`0x${string}` | null)[] = []
+  for (const c of calls) {
+    try {
+      const res = await fetch(rpc, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1,
+          method: 'eth_call',
+          params: [{ to: c.to, data: c.data }, 'latest'],
+        }),
+        signal: AbortSignal.timeout(8_000),
+      })
+      const json = await res.json()
+      if (json.error || !json.result || json.result === '0x') {
+        out.push(null)
+      } else {
+        out.push(json.result as `0x${string}`)
+      }
+    } catch {
+      out.push(null)
+    }
+  }
   return out
+}
+
+// ─── Fetch gauge emissions for pool addresses ───────────────────────────────
+async function fetchGaugeEmissions(
+  poolAddresses: string[],
+): Promise<Map<string, number>> {
+  // Map: poolAddress (lowercase) → rewardRate (VELO/sec, float, 18 decimals already divided)
+  const emissions = new Map<string, number>()
+  if (poolAddresses.length === 0) return emissions
+
+  // Step 1: Call Voter.gauges(pool) for each pool to get gauge addresses
+  const gaugesCalls = poolAddresses.map(pool => ({
+    to: VOTER_INK,
+    data: encodeFunctionData({ abi: VOTER_ABI, functionName: 'gauges', args: [pool as `0x${string}`] }),
+  }))
+
+  console.log(`[best-aprs] Fetching gauges for ${poolAddresses.length} pools...`)
+  const gaugeResults = await rpcBatch(gaugesCalls)
+
+  // Parse gauge addresses
+  const gaugeMap = new Map<string, string>() // poolAddr → gaugeAddr
+  const gaugeAddrs: string[] = []
+  for (let i = 0; i < poolAddresses.length; i++) {
+    const raw = gaugeResults[i]
+    if (!raw) continue
+    try {
+      const decoded = decodeFunctionResult({ abi: VOTER_ABI, functionName: 'gauges', data: raw })
+      const gaugeAddr = String(decoded)
+      if (gaugeAddr && gaugeAddr !== ZERO_ADDR) {
+        gaugeMap.set(poolAddresses[i].toLowerCase(), gaugeAddr)
+        gaugeAddrs.push(gaugeAddr)
+      }
+    } catch {}
+  }
+
+  console.log(`[best-aprs] Found ${gaugeMap.size} active gauges out of ${poolAddresses.length} pools`)
+
+  if (gaugeAddrs.length === 0) return emissions
+
+  // Step 2: Call Gauge.rewardRate() for each gauge
+  const rewardCalls = gaugeAddrs.map(gauge => ({
+    to: gauge,
+    data: encodeFunctionData({ abi: GAUGE_ABI, functionName: 'rewardRate', args: [] }),
+  }))
+
+  const rewardResults = await rpcBatch(rewardCalls)
+
+  // Parse reward rates and map back to pool addresses
+  let withEmissions = 0
+  const poolToGauge = [...gaugeMap.entries()] // [(poolAddr, gaugeAddr)]
+  for (let i = 0; i < poolToGauge.length; i++) {
+    const [poolAddr, _gaugeAddr] = poolToGauge[i]
+    const raw = rewardResults[i]
+    if (!raw) continue
+    try {
+      const decoded = decodeFunctionResult({ abi: GAUGE_ABI, functionName: 'rewardRate', data: raw })
+      const rateWei = BigInt(String(decoded))
+      if (rateWei > 0n) {
+        const rateFloat = Number(rateWei) / 1e18
+        emissions.set(poolAddr, rateFloat)
+        withEmissions++
+      }
+    } catch {}
+  }
+
+  console.log(`[best-aprs] Gauge emissions: ${withEmissions} gauges with active rewards`)
+  return emissions
 }
 
 // ─── GeckoTerminal: TVL, volume, and VELO price ──────────────────────────────
 
 interface GeckoPool {
+  address: string   // pool contract address on Ink
   base: string
   quote: string
   tvl: number
@@ -599,11 +543,17 @@ async function fetchGeckoPools(): Promise<GeckoPool[]> {
       const vol24h = parseFloat(attrs.volume_usd?.h24 ?? '0')
       if (tvl < 50) continue
 
+      // Extract the actual pool address (format: "ink_0xABC123...")
+      let poolAddress = attrs.address ?? ''
+      if (!poolAddress && typeof pool.id === 'string') {
+        poolAddress = pool.id.replace(/^ink_/i, '')
+      }
+
       const pairIsStable = poolName.toLowerCase().includes('stable') || allStable([base, quote])
       const feeRate = pairIsStable ? VELO_FEE_STABLE : VELO_FEE_DEFAULT
       const feeApr  = tvl > 0 ? (vol24h * feeRate * 365 / tvl) * 100 : 0
 
-      out.push({ base, quote, tvl, vol24h, isCL: isSlipstream, isStable: pairIsStable, feeApr })
+      out.push({ address: poolAddress, base, quote, tvl, vol24h, isCL: isSlipstream, isStable: pairIsStable, feeApr })
     }
   }
 
@@ -611,82 +561,56 @@ async function fetchGeckoPools(): Promise<GeckoPool[]> {
   return out
 }
 
-// ─── Combined Velodrome: Sugar emissions + GeckoTerminal price/TVL ───────────
+// ─── Combined Velodrome: Gauge emissions + GeckoTerminal price/TVL ──────────
 async function fetchVelodromeData(): Promise<AprEntry[]> {
-  const [sugarResult, geckoResult] = await Promise.allSettled([
-    fetchSugarPools(),
-    fetchGeckoTerminalData(),
-  ])
-
-  const sugarPools = sugarResult.status === 'fulfilled' ? sugarResult.value : []
-  const geckoData  = geckoResult.status === 'fulfilled' ? geckoResult.value : { pools: [], veloPrice: 0 }
-
-  if (sugarResult.status === 'rejected') {
-    console.log(`[best-aprs] Sugar failed: ${sugarResult.reason}`)
-  }
-
+  const geckoData = await fetchGeckoTerminalData()
   const { pools: geckoPools, veloPrice } = geckoData
   const out: AprEntry[] = []
 
-  // TVL + vol lookup from GeckoTerminal
-  const geckoByPair = new Map<string, GeckoPool>()
-  for (const g of geckoPools) {
-    const key = [g.base, g.quote].map(t => t.toUpperCase()).sort().join('-')
-    const existing = geckoByPair.get(key)
-    if (!existing || g.tvl > existing.tvl) geckoByPair.set(key, g)
-  }
-
-  // Strategy A: Sugar emissions + VELO price → real emission APR
-  if (sugarPools.length > 0 && veloPrice > 0) {
-    console.log(`[best-aprs] Computing emission APR: ${sugarPools.length} pools, VELO=$${veloPrice}`)
-
-    for (const sp of sugarPools) {
-      const key = [sp.base, sp.quote].map(t => t.toUpperCase()).sort().join('-')
-      const gecko = geckoByPair.get(key)
-      const tvl = gecko?.tvl ?? 0
-
-      // Emission APR = (emissions_per_sec × VELO_price × seconds_per_year / TVL) × 100
-      // emissions is uint256 with 18 decimals
-      const emissionsPerSec = Number(sp.emissions) / 1e18
-      let emissionApr = 0
-      if (emissionsPerSec > 0 && tvl > 0) {
-        emissionApr = (emissionsPerSec * veloPrice * SECONDS_YEAR / tvl) * 100
-      }
-
-      // Fee APR from GeckoTerminal volume data
-      const feeApr = gecko?.feeApr ?? 0
-      const totalApr = emissionApr + feeApr
-
-      if (totalApr <= 0 && tvl < 500) continue
-      if (totalApr > 50_000) continue
-
-      const suffix = sp.isStable ? ' (stable)' : sp.isCL ? ' (CL)' : ''
-      out.push({
-        protocol: sp.isCL ? 'Velodrome V3' : 'Velodrome',
-        logo:     'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48',
-        url:      VELO_URL,
-        tokens:   [sp.base, sp.quote],
-        label:    `${sp.base}-${sp.quote}${suffix}`,
-        apr:      Math.round(totalApr * 100) / 100,
-        tvl,
-        type:     'pool',
-        isStable: sp.isStable,
-      })
-    }
-
-    const sorted = [...out].sort((a, b) => b.apr - a.apr)
-    for (const s of sorted.slice(0, 5)) {
-      console.log(`  → ${s.label}: APR=${s.apr}% (tvl=$${s.tvl.toFixed(0)})`)
-    }
-
-    console.log(`[best-aprs] Velodrome: ${out.length} pools with emission APR`)
+  if (geckoPools.length === 0) {
+    console.log(`[best-aprs] No GeckoTerminal pools found`)
     return out
   }
 
-  // Strategy B: Fallback — fee-only APR from GeckoTerminal
-  console.log(`[best-aprs] Velodrome: fallback to fee-only APR`)
+  // Get pool addresses for gauge lookup
+  const poolAddresses = geckoPools
+    .map(g => g.address)
+    .filter(a => a && a.startsWith('0x'))
+
+  // Fetch gauge emissions via direct RPC calls
+  let emissions = new Map<string, number>()
+  if (poolAddresses.length > 0 && veloPrice > 0) {
+    try {
+      emissions = await fetchGaugeEmissions(poolAddresses)
+    } catch (e) {
+      console.log(`[best-aprs] Gauge emissions fetch failed: ${e}`)
+    }
+  }
+
+  const hasEmissions = emissions.size > 0 && veloPrice > 0
+
+  if (hasEmissions) {
+    console.log(`[best-aprs] Computing emission APR: ${geckoPools.length} pools, VELO=$${veloPrice}, ${emissions.size} with gauges`)
+  } else {
+    console.log(`[best-aprs] Velodrome: fallback to fee-only APR (veloPrice=$${veloPrice}, gauges=${emissions.size})`)
+  }
+
   for (const g of geckoPools) {
-    if (g.feeApr <= 0 && g.tvl < 500) continue
+    // Emission APR from gauge rewardRate
+    let emissionApr = 0
+    if (hasEmissions) {
+      const rewardRate = emissions.get(g.address.toLowerCase()) ?? 0
+      if (rewardRate > 0 && g.tvl > 0) {
+        // rewardRate is VELO/sec (already divided by 1e18)
+        emissionApr = (rewardRate * veloPrice * SECONDS_YEAR / g.tvl) * 100
+      }
+    }
+
+    const totalApr = emissionApr + g.feeApr
+
+    if (totalApr <= 0 && g.tvl < 500) continue
+    if (totalApr > 50_000) continue
+
     const suffix = g.isStable ? ' (stable)' : g.isCL ? ' (CL)' : ''
     out.push({
       protocol: g.isCL ? 'Velodrome V3' : 'Velodrome',
@@ -694,13 +618,20 @@ async function fetchVelodromeData(): Promise<AprEntry[]> {
       url:      VELO_URL,
       tokens:   [g.base, g.quote],
       label:    `${g.base}-${g.quote}${suffix}`,
-      apr:      Math.round(Math.min(g.feeApr, 50_000) * 100) / 100,
+      apr:      Math.round(totalApr * 100) / 100,
       tvl:      g.tvl,
       type:     'pool',
       isStable: g.isStable,
     })
   }
 
+  // Log top 5
+  const sorted = [...out].sort((a, b) => b.apr - a.apr)
+  for (const s of sorted.slice(0, 5)) {
+    console.log(`  → ${s.label}: APR=${s.apr}% (tvl=$${s.tvl.toFixed(0)})`)
+  }
+
+  console.log(`[best-aprs] Velodrome: ${out.length} pools (${emissions.size} with emission APR)`)
   return out
 }
 
@@ -720,18 +651,18 @@ function dedupeKey(tokens: string[], protocol: string): string {
 async function fetchAllAprs(): Promise<AprEntry[]> {
   // Fetch from all sources in parallel:
   // - DefiLlama: All Ink protocols (Curve, Aave, Morpho, Tydro, etc.)
-  // - Velodrome: Sugar on-chain APR + GeckoTerminal TVL (with fallback)
+  // - Velodrome: Gauge emissions via direct RPC + GeckoTerminal TVL
   const [defiLlama, velodrome] = await Promise.all([
     fetchDefiLlama(),
     fetchVelodromeData(),
   ])
 
   // DefiLlama has data for many protocols including Velodrome
-  // Velodrome data from Sugar has the most accurate APR (includes emissions)
+  // Velodrome data from gauge emissions has the most accurate APR
   const all: AprEntry[] = []
   const existingKeys = new Set<string>()
 
-  // 1. Add Velodrome data first (Sugar has the best APR data)
+  // 1. Add Velodrome data first (gauge emissions have the best APR data)
   for (const v of velodrome) {
     if (v.apr > 0 || v.tvl >= 500) {
       const key = dedupeKey(v.tokens, v.protocol)
@@ -744,7 +675,7 @@ async function fetchAllAprs(): Promise<AprEntry[]> {
   for (const d of defiLlama) {
     const key = dedupeKey(d.tokens, d.protocol)
     if (existingKeys.has(key)) {
-      // If DefiLlama has higher APR for this pool, update (shouldn't happen with Sugar)
+      // If DefiLlama has higher APR for this pool, update
       const existing = all.find(e => dedupeKey(e.tokens, e.protocol) === key)
       if (existing && d.apr > existing.apr && d.apr > 0) {
         existing.apr = d.apr
