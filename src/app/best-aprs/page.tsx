@@ -4,7 +4,18 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { RefreshCw, ExternalLink, TrendingUp, Zap, Layers, BookOpen, Coins } from 'lucide-react'
 import { SORA } from '@/lib/styles'
 import AdBanner from '@/components/AdBanner'
-import type { AprEntry } from '@/app/api/best-aprs/route'
+
+// Duplicated from api/best-aprs/route.ts to avoid importing server-only module
+interface AprEntry {
+  protocol:   string
+  logo:       string
+  url:        string
+  tokens:     string[]
+  label:      string
+  apr:        number
+  type:       'pool' | 'vault' | 'lend'
+  isStable:   boolean
+}
 
 // ─── Auto-refresh interval ────────────────────────────────────────────────────
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000  // 5 minutes
