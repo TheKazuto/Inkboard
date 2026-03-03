@@ -274,6 +274,32 @@ const GAUGE_ABI: Abi = [{
   outputs: [{ name: '', type: 'uint256' }],
 }]
 
+// Superchain gauges may use rewardRate(address _token) instead
+const GAUGE_ABI_TOKEN: Abi = [{
+  name: 'rewardRate',
+  type: 'function',
+  stateMutability: 'view',
+  inputs:  [{ name: '_token', type: 'address' }],
+  outputs: [{ name: '', type: 'uint256' }],
+}]
+
+// Also try rewardRateByEpoch and left() as fallbacks
+const GAUGE_LEFT_ABI: Abi = [{
+  name: 'left',
+  type: 'function',
+  stateMutability: 'view',
+  inputs:  [],
+  outputs: [{ name: '', type: 'uint256' }],
+}]
+
+const GAUGE_LEFT_TOKEN_ABI: Abi = [{
+  name: 'left',
+  type: 'function',
+  stateMutability: 'view',
+  inputs:  [{ name: '_token', type: 'address' }],
+  outputs: [{ name: '', type: 'uint256' }],
+}]
+
 const ZERO_ADDR = '0x0000000000000000000000000000000000000000'
 
 // ─── JSON-RPC batch helper ──────────────────────────────────────────────────
@@ -371,7 +397,6 @@ async function fetchGaugeEmissions(
 
   // Parse gauge addresses
   const gaugeMap = new Map<string, string>() // poolAddr → gaugeAddr
-  const gaugeAddrs: string[] = []
   for (let i = 0; i < poolAddresses.length; i++) {
     const raw = gaugeResults[i]
     if (!raw) continue
@@ -380,42 +405,133 @@ async function fetchGaugeEmissions(
       const gaugeAddr = String(decoded)
       if (gaugeAddr && gaugeAddr !== ZERO_ADDR) {
         gaugeMap.set(poolAddresses[i].toLowerCase(), gaugeAddr)
-        gaugeAddrs.push(gaugeAddr)
       }
     } catch {}
   }
 
   console.log(`[best-aprs] Found ${gaugeMap.size} active gauges out of ${poolAddresses.length} pools`)
+  if (gaugeMap.size === 0) return emissions
 
-  if (gaugeAddrs.length === 0) return emissions
+  // Log gauge addresses for debugging
+  for (const [pool, gauge] of gaugeMap) {
+    console.log(`[best-aprs]   gauge: ${gauge} ← pool ${pool.slice(0, 10)}...`)
+  }
 
-  // Step 2: Call Gauge.rewardRate() for each gauge
-  const rewardCalls = gaugeAddrs.map(gauge => ({
+  const poolToGauge = [...gaugeMap.entries()] // [(poolAddr, gaugeAddr)]
+  const gaugeAddrs = poolToGauge.map(([, g]) => g)
+
+  // Step 2A: Try rewardRate() — no args (V2-style)
+  const rateCallsNoArg = gaugeAddrs.map(gauge => ({
     to: gauge,
     data: encodeFunctionData({ abi: GAUGE_ABI, functionName: 'rewardRate', args: [] }),
   }))
+  const rateNoArgResults = await rpcBatch(rateCallsNoArg)
 
-  const rewardResults = await rpcBatch(rewardCalls)
-
-  // Parse reward rates and map back to pool addresses
-  let withEmissions = 0
-  const poolToGauge = [...gaugeMap.entries()] // [(poolAddr, gaugeAddr)]
+  let noArgCount = 0
   for (let i = 0; i < poolToGauge.length; i++) {
-    const [poolAddr, _gaugeAddr] = poolToGauge[i]
-    const raw = rewardResults[i]
+    const [poolAddr] = poolToGauge[i]
+    const raw = rateNoArgResults[i]
     if (!raw) continue
     try {
       const decoded = decodeFunctionResult({ abi: GAUGE_ABI, functionName: 'rewardRate', data: raw })
       const rateWei = BigInt(String(decoded))
+      console.log(`[best-aprs]   rewardRate() ${poolAddr.slice(0, 10)}... = ${rateWei}`)
       if (rateWei > 0n) {
-        const rateFloat = Number(rateWei) / 1e18
-        emissions.set(poolAddr, rateFloat)
-        withEmissions++
+        emissions.set(poolAddr, Number(rateWei) / 1e18)
+        noArgCount++
       }
     } catch {}
   }
 
-  console.log(`[best-aprs] Gauge emissions: ${withEmissions} gauges with active rewards`)
+  console.log(`[best-aprs] rewardRate() no-arg: ${noArgCount}/${gaugeAddrs.length} with rewards`)
+
+  // Step 2B: Try rewardRate(address _token) with xVELO — Superchain style
+  const rateCallsToken = gaugeAddrs.map(gauge => ({
+    to: gauge,
+    data: encodeFunctionData({ abi: GAUGE_ABI_TOKEN, functionName: 'rewardRate', args: [XVELO_INK as `0x${string}`] }),
+  }))
+  const rateTokenResults = await rpcBatch(rateCallsToken)
+
+  let tokenArgCount = 0
+  for (let i = 0; i < poolToGauge.length; i++) {
+    const [poolAddr] = poolToGauge[i]
+    if (emissions.has(poolAddr)) continue // already got from no-arg
+    const raw = rateTokenResults[i]
+    if (!raw) continue
+    try {
+      const decoded = decodeFunctionResult({ abi: GAUGE_ABI_TOKEN, functionName: 'rewardRate', data: raw })
+      const rateWei = BigInt(String(decoded))
+      console.log(`[best-aprs]   rewardRate(xVELO) ${poolAddr.slice(0, 10)}... = ${rateWei}`)
+      if (rateWei > 0n) {
+        emissions.set(poolAddr, Number(rateWei) / 1e18)
+        tokenArgCount++
+      }
+    } catch {}
+  }
+
+  console.log(`[best-aprs] rewardRate(xVELO): ${tokenArgCount} additional gauges with rewards`)
+
+  // Step 2C: If still low, try left() and left(address) to get remaining rewards
+  // left() returns remaining VELO for current epoch. APR ≈ left / (7 days) annualized
+  const gaugesWithoutEmissions = poolToGauge.filter(([p]) => !emissions.has(p))
+  if (gaugesWithoutEmissions.length > 0) {
+    // Try left() no-arg
+    const leftCalls = gaugesWithoutEmissions.map(([, gauge]) => ({
+      to: gauge,
+      data: encodeFunctionData({ abi: GAUGE_LEFT_ABI, functionName: 'left', args: [] }),
+    }))
+    const leftResults = await rpcBatch(leftCalls)
+
+    let leftCount = 0
+    for (let i = 0; i < gaugesWithoutEmissions.length; i++) {
+      const [poolAddr] = gaugesWithoutEmissions[i]
+      const raw = leftResults[i]
+      if (!raw) continue
+      try {
+        const decoded = decodeFunctionResult({ abi: GAUGE_LEFT_ABI, functionName: 'left', data: raw })
+        const leftWei = BigInt(String(decoded))
+        console.log(`[best-aprs]   left() ${poolAddr.slice(0, 10)}... = ${leftWei}`)
+        if (leftWei > 0n) {
+          // Convert remaining to rate: left / (7 days in seconds)
+          const rateFromLeft = Number(leftWei) / 1e18 / (7 * 86400)
+          emissions.set(poolAddr, rateFromLeft)
+          leftCount++
+        }
+      } catch {}
+    }
+
+    // Try left(address) with xVELO
+    const gaugesStillMissing = gaugesWithoutEmissions.filter(([p]) => !emissions.has(p))
+    if (gaugesStillMissing.length > 0) {
+      const leftTokenCalls = gaugesStillMissing.map(([, gauge]) => ({
+        to: gauge,
+        data: encodeFunctionData({ abi: GAUGE_LEFT_TOKEN_ABI, functionName: 'left', args: [XVELO_INK as `0x${string}`] }),
+      }))
+      const leftTokenResults = await rpcBatch(leftTokenCalls)
+
+      for (let i = 0; i < gaugesStillMissing.length; i++) {
+        const [poolAddr] = gaugesStillMissing[i]
+        const raw = leftTokenResults[i]
+        if (!raw) continue
+        try {
+          const decoded = decodeFunctionResult({ abi: GAUGE_LEFT_TOKEN_ABI, functionName: 'left', data: raw })
+          const leftWei = BigInt(String(decoded))
+          console.log(`[best-aprs]   left(xVELO) ${poolAddr.slice(0, 10)}... = ${leftWei}`)
+          if (leftWei > 0n) {
+            const rateFromLeft = Number(leftWei) / 1e18 / (7 * 86400)
+            emissions.set(poolAddr, rateFromLeft)
+            leftCount++
+          }
+        } catch {}
+      }
+    }
+
+    if (leftCount > 0) {
+      console.log(`[best-aprs] left() fallback: ${leftCount} additional gauges with rewards`)
+    }
+  }
+
+  console.log(`[best-aprs] Gauge emissions total: ${emissions.size} gauges with active rewards`)
   return emissions
 }
 
@@ -576,6 +692,11 @@ async function fetchVelodromeData(): Promise<AprEntry[]> {
   const poolAddresses = geckoPools
     .map(g => g.address)
     .filter(a => a && a.startsWith('0x'))
+
+  // Log pool addresses for debugging
+  for (const g of geckoPools.slice(0, 5)) {
+    console.log(`[best-aprs]   pool: ${g.address} (${g.base}/${g.quote}, tvl=$${g.tvl.toFixed(0)})`)
+  }
 
   // Fetch gauge emissions via direct RPC calls
   let emissions = new Map<string, number>()
