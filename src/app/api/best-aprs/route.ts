@@ -236,6 +236,7 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
 // Source: https://github.com/velodrome-finance/indexer/blob/main/config.yaml
 
 const VOTER_INK    = '0x97cDBCe21B6fd0585d29E539B1B99dAd328a1123' as const
+const SUGAR_INK    = '0x46e07c9b4016f8E5c3cD0b2fd20147A4d0972120' as const
 const INK_RPC      = 'https://rpc-gel.inkonchain.com'
 const INK_RPC_ALT  = 'https://ink.drpc.org'
 const VELO_URL     = 'https://velodrome.finance/liquidity?chain=57073'
@@ -245,7 +246,7 @@ const SECONDS_YEAR = 86400 * 365
 // GeckoTerminal DEX IDs for Velodrome on Ink
 const VELO_DEX_IDS = [
   'velodrome-finance-v2-ink',
-  'velodrome-slipstream-ink',
+  'velodrome-finance-slipstream-ink',
 ]
 
 // xVELO on Ink — the emissions token
@@ -301,6 +302,213 @@ const GAUGE_LEFT_TOKEN_ABI: Abi = [{
 }]
 
 const ZERO_ADDR = '0x0000000000000000000000000000000000000000'
+
+// ─── Sugar contract ABI (32-field Lp struct from README) ──────────────────────
+// Fields: lp, symbol, decimals, liquidity, type, tick, sqrt_ratio, token0,
+// reserve0, staked0, token1, reserve1, staked1, gauge, gauge_liquidity,
+// gauge_alive, fee, bribe, factory, emissions, emissions_token, emissions_cap,
+// pool_fee, unstaked_fee, token0_fees, token1_fees, locked, emerging,
+// created_at, nfpm, alm, root
+
+const LP_TUPLE = {
+  type: 'tuple',
+  components: [
+    { name: 'lp', type: 'address' },
+    { name: 'symbol', type: 'string' },
+    { name: 'decimals', type: 'uint8' },
+    { name: 'liquidity', type: 'uint256' },
+    { name: 'type_', type: 'int256' },
+    { name: 'tick', type: 'int256' },
+    { name: 'sqrt_ratio', type: 'uint256' },
+    { name: 'token0', type: 'address' },
+    { name: 'reserve0', type: 'uint256' },
+    { name: 'staked0', type: 'uint256' },
+    { name: 'token1', type: 'address' },
+    { name: 'reserve1', type: 'uint256' },
+    { name: 'staked1', type: 'uint256' },
+    { name: 'gauge', type: 'address' },
+    { name: 'gauge_liquidity', type: 'uint256' },
+    { name: 'gauge_alive', type: 'bool' },
+    { name: 'fee', type: 'address' },
+    { name: 'bribe', type: 'address' },
+    { name: 'factory', type: 'address' },
+    { name: 'emissions', type: 'uint256' },
+    { name: 'emissions_token', type: 'address' },
+    { name: 'emissions_cap', type: 'uint256' },
+    { name: 'pool_fee', type: 'uint256' },
+    { name: 'unstaked_fee', type: 'uint256' },
+    { name: 'token0_fees', type: 'uint256' },
+    { name: 'token1_fees', type: 'uint256' },
+    { name: 'locked', type: 'uint256' },
+    { name: 'emerging', type: 'bool' },
+    { name: 'created_at', type: 'uint256' },
+    { name: 'nfpm', type: 'address' },
+    { name: 'alm', type: 'address' },
+    { name: 'root', type: 'address' },
+  ],
+} as const
+
+const SUGAR_ABI: Abi = [
+  {
+    name: 'count',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    name: 'byIndex',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: '_index', type: 'uint256' }],
+    outputs: [LP_TUPLE],
+  },
+  {
+    name: 'byAddress',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: '_pool', type: 'address' }],
+    outputs: [LP_TUPLE],
+  },
+  {
+    name: 'all',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [
+      { name: '_limit', type: 'uint256' },
+      { name: '_offset', type: 'uint256' },
+    ],
+    outputs: [{ type: 'tuple[]', components: LP_TUPLE.components }],
+  },
+]
+
+// ─── Fetch emissions via Sugar contract ─────────────────────────────────────
+async function fetchSugarEmissions(
+  poolAddresses: string[],
+): Promise<Map<string, number>> {
+  const emissions = new Map<string, number>()
+
+  // Step 1: Try Sugar.count() to verify the contract is reachable
+  try {
+    const countData = encodeFunctionData({ abi: SUGAR_ABI, functionName: 'count', args: [] })
+    const countResult = await rpcCall(SUGAR_INK, countData)
+    if (countResult) {
+      const count = decodeFunctionResult({ abi: SUGAR_ABI, functionName: 'count', data: countResult })
+      console.log(`[best-aprs] Sugar.count() = ${count}`)
+    } else {
+      console.log(`[best-aprs] Sugar.count() failed - contract may not exist at ${SUGAR_INK}`)
+      return emissions
+    }
+  } catch (e) {
+    console.log(`[best-aprs] Sugar.count() error: ${e}`)
+    return emissions
+  }
+
+  // Step 2: Try Sugar.byAddress() for each pool
+  for (const pool of poolAddresses.slice(0, 6)) { // limit to first 6 for diagnostics
+    try {
+      const callData = encodeFunctionData({
+        abi: SUGAR_ABI,
+        functionName: 'byAddress',
+        args: [pool as `0x${string}`],
+      })
+      const result = await rpcCall(SUGAR_INK, callData)
+      if (!result) {
+        console.log(`[best-aprs] Sugar.byAddress(${pool.slice(0, 10)}...) = null`)
+        continue
+      }
+
+      const decoded = decodeFunctionResult({
+        abi: SUGAR_ABI,
+        functionName: 'byAddress',
+        data: result,
+      }) as any
+
+      const lp = Array.isArray(decoded) ? decoded[0] ?? decoded : decoded
+      const emissionsWei = BigInt(String(lp.emissions ?? lp[19] ?? 0))
+      const symbol = String(lp.symbol ?? lp[1] ?? '?')
+      const gaugeAddr = String(lp.gauge ?? lp[13] ?? ZERO_ADDR)
+      const gaugeAlive = Boolean(lp.gauge_alive ?? lp[15] ?? false)
+
+      console.log(`[best-aprs] Sugar pool ${pool.slice(0, 10)}...: symbol=${symbol}, emissions=${emissionsWei}, gauge=${gaugeAddr.slice(0, 10)}..., alive=${gaugeAlive}`)
+
+      if (emissionsWei > 0n) {
+        emissions.set(pool.toLowerCase(), Number(emissionsWei) / 1e18)
+      }
+    } catch (e) {
+      console.log(`[best-aprs] Sugar.byAddress(${pool.slice(0, 10)}...) error: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  // Step 3: If byAddress didn't work, try all() with small limit
+  if (emissions.size === 0) {
+    console.log(`[best-aprs] Sugar.byAddress returned no emissions, trying Sugar.all(20, 0)...`)
+    try {
+      const allData = encodeFunctionData({
+        abi: SUGAR_ABI,
+        functionName: 'all',
+        args: [20n, 0n],
+      })
+      const allResult = await rpcCall(SUGAR_INK, allData, 200_000_000)
+      if (allResult) {
+        const decoded = decodeFunctionResult({
+          abi: SUGAR_ABI,
+          functionName: 'all',
+          data: allResult,
+        }) as any[]
+
+        const pools = Array.isArray(decoded[0]) ? decoded[0] : decoded
+        console.log(`[best-aprs] Sugar.all() returned ${pools.length} pools`)
+
+        for (const lp of pools) {
+          const addr = String(lp.lp ?? lp[0] ?? '').toLowerCase()
+          const emissionsWei = BigInt(String(lp.emissions ?? lp[19] ?? 0))
+          const symbol = String(lp.symbol ?? lp[1] ?? '?')
+          if (emissionsWei > 0n) {
+            console.log(`[best-aprs]   Sugar pool ${symbol}: emissions=${emissionsWei} (${addr.slice(0, 10)}...)`)
+            emissions.set(addr, Number(emissionsWei) / 1e18)
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`[best-aprs] Sugar.all() error: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  console.log(`[best-aprs] Sugar emissions: ${emissions.size} pools with active emissions`)
+  return emissions
+}
+
+// Simple single RPC call helper
+async function rpcCall(to: string, data: `0x${string}`, gas?: number): Promise<`0x${string}` | null> {
+  const params: any = { to, data }
+  if (gas) params.gas = `0x${gas.toString(16)}`
+
+  for (const rpc of [INK_RPC, INK_RPC_ALT]) {
+    try {
+      const res = await fetch(rpc, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1,
+          method: 'eth_call',
+          params: [params, 'latest'],
+        }),
+        signal: AbortSignal.timeout(15_000),
+      })
+      const json = await res.json()
+      if (json.error) {
+        console.log(`[best-aprs] RPC call to ${to.slice(0, 10)}... via ${rpc}: error=${json.error.message ?? JSON.stringify(json.error).slice(0, 100)}`)
+        continue
+      }
+      if (!json.result || json.result === '0x') return null
+      return json.result as `0x${string}`
+    } catch (e) {
+      continue
+    }
+  }
+  return null
+}
 
 // ─── JSON-RPC batch helper ──────────────────────────────────────────────────
 async function rpcBatch(
@@ -698,13 +906,25 @@ async function fetchVelodromeData(): Promise<AprEntry[]> {
     console.log(`[best-aprs]   pool: ${g.address} (${g.base}/${g.quote}, tvl=$${g.tvl.toFixed(0)})`)
   }
 
-  // Fetch gauge emissions via direct RPC calls
+  // Fetch gauge emissions — try Sugar first (has emissions field), fall back to direct gauge calls
   let emissions = new Map<string, number>()
   if (poolAddresses.length > 0 && veloPrice > 0) {
+    // Strategy 1: Sugar contract (most reliable — has pre-computed emissions)
     try {
-      emissions = await fetchGaugeEmissions(poolAddresses)
+      console.log(`[best-aprs] Trying Sugar contract for emissions...`)
+      emissions = await fetchSugarEmissions(poolAddresses)
     } catch (e) {
-      console.log(`[best-aprs] Gauge emissions fetch failed: ${e}`)
+      console.log(`[best-aprs] Sugar emissions failed: ${e}`)
+    }
+
+    // Strategy 2: Direct gauge calls (fallback)
+    if (emissions.size === 0) {
+      try {
+        console.log(`[best-aprs] Falling back to direct gauge calls...`)
+        emissions = await fetchGaugeEmissions(poolAddresses)
+      } catch (e) {
+        console.log(`[best-aprs] Gauge emissions fetch failed: ${e}`)
+      }
     }
   }
 
