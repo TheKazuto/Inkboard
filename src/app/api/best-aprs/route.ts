@@ -68,7 +68,7 @@ const XVELO_INK    = '0x7f9AdFbd38b669F03d1d11000Bc76b9AaEA28A81'
 const VELO_DEX_IDS = ['velodrome-finance-v2-ink', 'velodrome-finance-slipstream-ink']
 
 // ─── InkySwap on Ink ────────────────────────────────────────────────────────
-// Uniswap-style AMM (v2/v3/v4) with 0.05% trading fee, no emission rewards
+// Uniswap-style AMM (v2/v3/v4) - subgraph provides fee + reward APR
 // Data sources: 1) InkySwap native API  2) DexScreener  3) GeckoTerminal
 const INKY_FEE       = 0.0005  // 0.05%
 const INKY_URL       = 'https://inkyswap.com/liquidity'
@@ -284,7 +284,56 @@ async function fetchVelodromeData(): Promise<AprEntry[]> {
 }
 
 // ─── InkySwap: native API → DexScreener → GeckoTerminal fallback chain ─────
-interface InkyPool { base: string; quote: string; tvl: number; vol24h: number; feeApr: number; isStable: boolean }
+interface InkyPool { base: string; quote: string; tvl: number; vol24h: number; feeApr: number; rewardApr: number; isStable: boolean }
+
+// Source 0: InkySwap subgraph endpoints (v2/v3/v4) includes reward APR
+async function fetchInkyFromSubgraph(): Promise<InkyPool[]> {
+  const versions = ['v2', 'v3', 'v4']
+  const out: InkyPool[] = []
+  const seen = new Set<string>()
+  const results = await Promise.allSettled(versions.map(async (ver) => {
+    const url = INKY_API_BASE + '/subgraph/' + ver + '/pools'
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { Accept: 'application/json' } })
+    if (!res.ok) throw new Error('Subgraph ' + ver + ' HTTP ' + res.status)
+    const json = await res.json()
+    return { ver, data: json }
+  }))
+  for (const r of results) {
+    if (r.status !== 'fulfilled') continue
+    const { ver, data } = r.value
+    const pools: any[] = Array.isArray(data) ? data : (data?.pools ?? data?.data?.pools ?? data?.data ?? [])
+    if (!Array.isArray(pools)) continue
+    for (const p of pools) {
+      const base  = p.token0?.symbol ?? p.baseToken?.symbol ?? p.token0Symbol ?? ''
+      const quote = p.token1?.symbol ?? p.quoteToken?.symbol ?? p.token1Symbol ?? ''
+      if (!base || !quote) continue
+      const key = (base + '-' + quote + '-' + ver).toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      const tvl    = parseFloat(p.totalValueLockedUSD ?? p.tvlUsd ?? p.tvl ?? p.liquidity?.usd ?? p.reserveUSD ?? '0')
+      const vol24h = parseFloat(p.volumeUSD24h ?? p.volume24h ?? p.volumeUSD ?? p.volume?.h24 ?? '0')
+      if (tvl < 50) continue
+      const poolApr    = parseFloat(p.poolApr ?? p.feeApr ?? p.feeAPR ?? '0')
+      const rewardApr  = parseFloat(p.rewardApr ?? p.rewardAPR ?? p.farmApr ?? p.incentiveApr ?? p.bonusApr ?? '0')
+      const totalApr   = parseFloat(p.totalApr ?? p.totalAPR ?? p.apr ?? '0')
+      let finalFeeApr = poolApr
+      let finalRewardApr = rewardApr
+      if (totalApr > 0 && totalApr > finalFeeApr && finalRewardApr === 0) {
+        finalRewardApr = totalApr - finalFeeApr
+      }
+      if (finalFeeApr === 0 && finalRewardApr === 0 && totalApr === 0) {
+        finalFeeApr = tvl > 0 ? (vol24h * INKY_FEE * 365 / tvl) * 100 : 0
+      }
+      const pairStable = allStable([base, quote])
+      out.push({ base, quote, tvl, vol24h, feeApr: Math.max(0, finalFeeApr), rewardApr: Math.max(0, finalRewardApr), isStable: pairStable })
+    }
+    console.log('[best-aprs] InkySwap subgraph ' + ver + ': ' + pools.length + ' pools parsed')
+  }
+  if (out.length === 0) throw new Error('InkySwap subgraph returned no pools')
+  const withRewards = out.filter(p => p.rewardApr > 0).length
+  console.log('[best-aprs] InkySwap subgraph total: ' + out.length + ' pools (' + withRewards + ' with reward APR)')
+  return out
+}
 
 // Source 1: InkySwap native /api/pairs
 async function fetchInkyFromNativeApi(): Promise<InkyPool[]> {
@@ -310,7 +359,7 @@ async function fetchInkyFromNativeApi(): Promise<InkyPool[]> {
 
     const pairStable = allStable([base, quote])
     const feeApr = tvl > 0 ? (vol24h * INKY_FEE * 365 / tvl) * 100 : 0
-    out.push({ base, quote, tvl, vol24h, feeApr, isStable: pairStable })
+    out.push({ base, quote, tvl, vol24h, feeApr, rewardApr: 0, isStable: pairStable })
   }
   console.log(`[best-aprs] InkySwap native API: ${out.length} pools from ${pairs.length} pairs`)
   return out
@@ -355,7 +404,7 @@ async function fetchInkyFromDexScreener(): Promise<InkyPool[]> {
 
       const pairStable = allStable([base, quote])
       const feeApr = tvl > 0 ? (vol24h * INKY_FEE * 365 / tvl) * 100 : 0
-      out.push({ base, quote, tvl, vol24h, feeApr, isStable: pairStable })
+      out.push({ base, quote, tvl, vol24h, feeApr, rewardApr: 0, isStable: pairStable })
     }
   }
   if (out.length === 0) throw new Error('DexScreener returned no InkySwap pairs')
@@ -408,23 +457,33 @@ async function fetchInkyFromGeckoTerminal(): Promise<InkyPool[]> {
 
     const pairStable = allStable([base, quote])
     const feeApr = tvl > 0 ? (vol24h * INKY_FEE * 365 / tvl) * 100 : 0
-    out.push({ base, quote, tvl, vol24h, feeApr, isStable: pairStable })
+    out.push({ base, quote, tvl, vol24h, feeApr, rewardApr: 0, isStable: pairStable })
   }
   console.log(`[best-aprs] InkySwap via GeckoTerminal: ${out.length} pools`)
   return out
 }
 
-// Orchestrator: try each source in order
+// Orchestrator: try each source in order (subgraph first for reward APR)
 async function fetchInkySwapData(): Promise<AprEntry[]> {
   let pools: InkyPool[] = []
   let source = ''
 
-  // 1) InkySwap native API
+  // 0) InkySwap subgraph (v2/v3/v4) - primary source with reward APR
   try {
-    pools = await fetchInkyFromNativeApi()
-    source = 'native API'
-  } catch (e) {
-    console.log(`[best-aprs] InkySwap native API failed: ${e}`)
+    pools = await fetchInkyFromSubgraph()
+    source = 'subgraph'
+  } catch (e: any) {
+    console.log('[best-aprs] InkySwap subgraph failed: ' + e.message)
+  }
+
+  // 1) InkySwap native API fallback
+  if (pools.length === 0) {
+    try {
+      pools = await fetchInkyFromNativeApi()
+      source = 'native API'
+    } catch (e) {
+      console.log(`[best-aprs] InkySwap native API failed: ${e}`)
+    }
   }
 
   // 2) DexScreener fallback
@@ -452,11 +511,12 @@ async function fetchInkySwapData(): Promise<AprEntry[]> {
     return []
   }
 
-  // Convert to AprEntry
+  // Convert to AprEntry (fee + reward APR combined)
   const out: AprEntry[] = []
   for (const p of pools) {
-    if (p.feeApr <= 0 && p.tvl < 500) continue
-    if (p.feeApr > 50_000) continue
+    const totalApr = p.feeApr + p.rewardApr
+    if (totalApr <= 0 && p.tvl < 500) continue
+    if (totalApr > 50_000) continue
 
     out.push({
       protocol: 'InkySwap',
@@ -464,7 +524,7 @@ async function fetchInkySwapData(): Promise<AprEntry[]> {
       url: INKY_URL,
       tokens: [p.base, p.quote],
       label: `${p.base}-${p.quote}`,
-      apr: Math.round(p.feeApr * 100) / 100,
+      apr: Math.round(totalApr * 100) / 100,
       tvl: p.tvl,
       type: 'pool',
       isStable: p.isStable,
@@ -472,8 +532,9 @@ async function fetchInkySwapData(): Promise<AprEntry[]> {
   }
 
   const sorted = [...out].sort((a, b) => b.apr - a.apr)
-  for (const s of sorted.slice(0, 3)) console.log(`→ InkySwap ${s.label}: APR=${s.apr}% (tvl=$${s.tvl.toFixed(0)})`)
-  console.log(`[best-aprs] InkySwap: ${out.length} pools via ${source} (fee-only APR @ ${INKY_FEE * 100}%)`)
+  for (const s of sorted.slice(0, 3)) console.log('[best-aprs] → InkySwap ' + s.label + ': APR=' + s.apr + '% (tvl=$' + s.tvl.toFixed(0) + ')')
+  const withRewards = pools.filter(p => p.rewardApr > 0).length
+  console.log('[best-aprs] InkySwap: ' + out.length + ' pools via ' + source + ' (' + withRewards + ' with reward APR)')
   return out
 }
 
