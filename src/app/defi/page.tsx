@@ -104,7 +104,12 @@ function LendingCard({ pos }: { pos: any }) {
     <div className="card p-5 hover:shadow-lg transition-all">
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-xl">{pos.logo}</div>
+          <div className="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-xl overflow-hidden">
+            {pos.logo?.startsWith('http')
+              // eslint-disable-next-line @next/next/no-img-element
+              ? <img src={pos.logo} alt={pos.protocol} width={40} height={40} className="rounded-full object-cover" />
+              : pos.logo}
+          </div>
           <div>
             <div className="font-semibold text-gray-800 text-sm flex items-center gap-1.5">
               {pos.protocol}<ExternalLink size={11} className="text-gray-300" />
@@ -184,7 +189,12 @@ function VaultCard({ pos }: { pos: any }) {
     <div className="card p-5 hover:shadow-lg transition-all">
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-xl">{pos.logo}</div>
+          <div className="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-xl overflow-hidden">
+            {pos.logo?.startsWith('http')
+              // eslint-disable-next-line @next/next/no-img-element
+              ? <img src={pos.logo} alt={pos.protocol} width={40} height={40} className="rounded-full object-cover" />
+              : pos.logo}
+          </div>
           <div>
             <div className="font-semibold text-gray-800 text-sm flex items-center gap-1.5">
               {pos.protocol}<ExternalLink size={11} className="text-gray-300" />
@@ -222,7 +232,12 @@ function LiquidityCard({ pos }: { pos: any }) {
     <div className="card p-5 hover:shadow-lg transition-all">
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-xl">{pos.logo}</div>
+          <div className="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-xl overflow-hidden">
+            {pos.logo?.startsWith('http')
+              // eslint-disable-next-line @next/next/no-img-element
+              ? <img src={pos.logo} alt={pos.protocol} width={40} height={40} className="rounded-full object-cover" />
+              : pos.logo}
+          </div>
           <div>
             <div className="font-semibold text-gray-800 text-sm flex items-center gap-1.5">
               {pos.protocol}<ExternalLink size={11} className="text-gray-300" />
@@ -332,20 +347,18 @@ function SummaryBanner({
 
 // ─── Protocols list — single shared component to avoid duplication ─────────────
 const PROTOCOLS = [
-  { name: 'Uniswap V3',     url: 'https://app.uniswap.org/swap?chain=ink', logo: '🦄' },
-  { name: 'Curve',          url: 'https://curve.fi/#/ink',                  logo: '🌊' },
-  { name: 'Morpho',         url: 'https://app.morpho.org/ink',              logo: '🦋' },
-  { name: 'Frax',           url: 'https://app.frax.finance',                logo: '⚡' },
-  { name: 'Gearbox',        url: 'https://app.gearbox.fi',                  logo: '⚙️' },
-  { name: 'Lagoon',         url: 'https://app.lagoon.finance',              logo: '🏝️' },
-  { name: 'Curvance',       url: 'https://app.curvance.com',                logo: '💎' },
-  { name: 'Euler V2',       url: 'https://app.euler.finance',               logo: '📐' },
-  { name: 'Kuru',           url: 'https://app.kuru.io',                     logo: '🌀' },
-  { name: 'Velodrome',      url: 'https://velodrome.finance/liquidity',     logo: '🏎' },
-  { name: 'Aave',           url: 'https://app.aave.com/',                   logo: '👻' },
-  { name: 'InkySwap',       url: 'https://inkyswap.com',                    logo: '🐙' },
-  { name: 'Midas',          url: 'https://midas.app',                       logo: '🏛️' },
+  { name: 'Tydro',      url: 'https://app.tydro.com',                         logo: 'https://icons.llamao.fi/icons/protocols/tydro?w=48&h=48'       },
+  { name: 'Velodrome',  url: 'https://velodrome.finance/liquidity?chain=57073', logo: 'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48' },
+  { name: 'Curve',      url: 'https://curve.fi/#/ink/pools',                   logo: 'https://icons.llamao.fi/icons/protocols/curve-dex?w=48&h=48'   },
+  { name: 'InkySwap',   url: 'https://inkyswap.com/liquidity',                 logo: 'https://icons.llamao.fi/icons/protocols/inkyswap?w=48&h=48'    },
 ]
+
+function ProtocolLogo({ src, name, size = 16 }: { src: string; name: string; size?: number }) {
+  if (src.startsWith('http'))
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src={src} alt={name} width={size} height={size} className="rounded-full object-contain" />
+  return <span>{src}</span>
+}
 
 function ProtocolsList({ textColor = 'text-gray-500', justify = '' }: { textColor?: string; justify?: string }) {
   return (
@@ -353,7 +366,7 @@ function ProtocolsList({ textColor = 'text-gray-500', justify = '' }: { textColo
       {PROTOCOLS.map(p => (
         <a key={p.name} href={p.url} target="_blank" rel="noopener noreferrer"
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-100 bg-white hover:border-violet-300 hover:bg-violet-50 text-xs ${textColor} hover:text-violet-700 transition-colors`}>
-          {p.logo} {p.name}
+          <ProtocolLogo src={p.logo} name={p.name} /> {p.name}
         </a>
       ))}
     </div>
