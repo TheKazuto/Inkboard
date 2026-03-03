@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { INK_RPC as RPC, rpcBatch, getEthPrice } from '@/lib/ink'
+import { INK_RPC, rpcBatch, getEthPrice } from '@/lib/ink'
 
 export const revalidate = 0
+
+// ─── RPC helpers ─────────────────────────────────────────────────────────────
 function ethCall(to: string, data: string, id: number) {
   return { jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data }, 'latest'] }
 }
@@ -12,60 +14,46 @@ function decodeUint(hex: string): bigint {
 function balanceOfData(addr: string): string {
   return '0x70a08231' + addr.slice(2).toLowerCase().padStart(64, '0')
 }
-function decodeAddress(hex: string): string {
-  if (!hex || hex === '0x') return '0x0000000000000000000000000000000000000000'
-  return '0x' + hex.slice(2).slice(-40)
-}
 
-// ─── Known tokens on Ink mainnet ───────────────────────────────────────────
-const KNOWN_TOKENS: Record<string, { symbol: string; decimals: number }> = {
-  '0x4200000000000000000000000000000000000006': { symbol: 'WETH',  decimals: 18 },
-  '0xF1815bd50389c46847f0Bda824eC8da914045D14': { symbol: 'USDC.e', decimals: 6  },
-  '0x0200C29006150606B650577BBE7B6248F58470c1': { symbol: 'USDT0', decimals: 6  },
-  '0x39fec550CC6DDCEd810eCCfA9B2931b4B5f2344D': { symbol: 'crvUSD', decimals: 18 },
-  '0x80eede496655fb9047dd39d9f418d5483ed600df': { symbol: 'frxUSD', decimals: 18 },
-  '0x43eDD7f3831b08FE70B7555ddD373C8bF65a9050': { symbol: 'frxETH', decimals: 18 },
+// ─── Token metadata (address → symbol/decimals) ─────────────────────────────
+const TOKEN_INFO: Record<string, { symbol: string; decimals: number }> = {
+  '0x4200000000000000000000000000000000000006': { symbol: 'WETH',    decimals: 18 },
+  '0xf1815bd50389c46847f0bda824ec8da914045d14': { symbol: 'USDC.e',  decimals: 6  },
+  '0x0200c29006150606b650577bbe7b6248f58470c1': { symbol: 'USDT0',   decimals: 6  },
+  '0x39fec550cc6ddced810eccfa9b2931b4b5f2344d': { symbol: 'crvUSD',  decimals: 18 },
+  '0x80eede496655fb9047dd39d9f418d5483ed600df': { symbol: 'frxUSD',  decimals: 18 },
+  '0x43edd7f3831b08fe70b7555ddd373c8bf65a9050': { symbol: 'frxETH',  decimals: 18 },
   '0x3ec3849c33291a9ef4c5db86de593eb4a37fde45': { symbol: 'sfrxETH', decimals: 18 },
-  '0xAC73671a1762FE835208Fb93b7aE7490d1c2cCb3': { symbol: 'CRV', decimals: 18 },
-  '0x64445f0aecc51e94ad52d8ac56b7190e764e561a': { symbol: 'FXS', decimals: 18 },
+  '0xac73671a1762fe835208fb93b7ae7490d1c2ccb3': { symbol: 'CRV',     decimals: 18 },
+  '0x64445f0aecc51e94ad52d8ac56b7190e764e561a': { symbol: 'FXS',     decimals: 18 },
 }
 
-// ─── Multi-token prices via CoinGecko ────────────────────────────────────────
-// Maps symbol → CoinGecko id
+// CoinGecko price mapping
 const COINGECKO_IDS: Record<string, string> = {
-  WETH:   'ethereum',
-  ETH:    'ethereum',
-  sfrxETH:'staked-frax-ether',
-  frxETH: 'frax-ether',
-  CRV:    'curve-dao-token',
-  FXS:    'frax-share',
-  WBTC:   'wrapped-bitcoin',
-  USDC:   'usd-coin',
-  USDT0:  'tether',
-  crvUSD: 'crvusd',
+  WETH: 'ethereum', ETH: 'ethereum',
+  sfrxETH: 'staked-frax-ether', frxETH: 'frax-ether',
+  CRV: 'curve-dao-token', FXS: 'frax-share',
+  WBTC: 'wrapped-bitcoin', kBTC: 'wrapped-bitcoin',
+  'USDC.e': 'usd-coin', USDC: 'usd-coin',
+  USDT0: 'tether', crvUSD: 'crvusd',
+  INK: 'ink', GHO: 'gho',
 }
+const STABLES = new Set([
+  'USDC', 'USDC.e', 'USDT0', 'USDT', 'crvUSD', 'DAI', 'USDG', 'GHO',
+  'frxUSD', 'sfrxUSD', 'BUSD', 'TUSD', 'LUSD',
+])
 
 async function getTokenPricesUSD(symbols: string[]): Promise<Record<string, number>> {
-  // Stablecoins we can resolve without an API call
-  const stables: Record<string, number> = { USDC: 1, USDT0: 1, crvUSD: 1, USDT: 1, DAI: 1 }
   const prices: Record<string, number> = {}
-
-  // Seed stablecoins immediately
-  for (const sym of symbols) {
-    if (stables[sym] !== undefined) prices[sym] = stables[sym]
-  }
-
+  for (const s of symbols) if (STABLES.has(s)) prices[s] = 1
   const toFetch = symbols.filter(s => prices[s] === undefined)
   if (!toFetch.length) return prices
-
-  // Collect unique CoinGecko IDs
   const ids = [...new Set(toFetch.map(s => COINGECKO_IDS[s]).filter(Boolean))]
   if (!ids.length) return prices
-
   try {
     const res = await fetch(
       `https://api.coingecko.com/api/v3/simple/price?ids=${ids.join(',')}&vs_currencies=usd`,
-      { next: { revalidate: 60 } }
+      { next: { revalidate: 60 } },
     )
     const data = await res.json()
     for (const sym of toFetch) {
@@ -73,205 +61,335 @@ async function getTokenPricesUSD(symbols: string[]): Promise<Record<string, numb
       if (id && data[id]?.usd) prices[sym] = data[id].usd
     }
   } catch { /* return what we have */ }
-
   return prices
 }
 
-// ─── AAVE V3 (Ink) ───────────────────────────────────────────────────────────
-// TODO: Add Aave V3 integration when deployed on Ink and scanner data is available
-// Aave has been mentioned on the official Ink X account as coming to Ink
-// When ready, use Pool contract getUserAccountData() + aToken/debtToken balances
-async function fetchAave(_user: string): Promise<any[]> {
-  return [] // Placeholder — waiting for Aave deployment scanner data
-}
+// ═══════════════════════════════════════════════════════════════════════════════
+// TYDRO — Aave V3 fork on Ink
+// ═══════════════════════════════════════════════════════════════════════════════
+const TYDRO_POOL_PROVIDER = '0x4172E6aAEC070ACB31aaCE343A58c93E4C70f44D'
+const TYDRO_DATA_PROVIDER = '0x96086C25d13943C80Ff9a19791a40Df6aFC08328'
 
-// ─── MORPHO ───────────────────────────────────────────────────────────────────
-async function fetchMorpho(user: string): Promise<any[]> {
-  // GraphQL confirmed at api.morpho.org/graphql for Ink (chainId 57073)
-  // Added: market.uniqueKey and vault.address for direct deep links
-  const query = `query($addr:String!,$cid:Int!){
-    userByAddress(address:$addr,chainId:$cid){
-      marketPositions{
-        market{
-          uniqueKey
-          loanAsset{symbol decimals}
-          collateralAsset{symbol decimals}
-          state{supplyApy borrowApy}
-        }
-        supplyAssets supplyAssetsUsd
-        borrowAssets borrowAssetsUsd
-        collateral collateralUsd
-        healthFactor
-      }
-      vaultPositions{
-        vault{
-          address
-          name
-          symbol
-          asset{symbol decimals}
-          state{netApy totalAssetsUsd}
-        }
-        assets assetsUsd
-      }
-    }
-  }`
+async function fetchTydro(user: string): Promise<any[]> {
   try {
-    const res = await fetch('https://api.morpho.org/graphql', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables: { addr: user.toLowerCase(), cid: 57073 } }),
-      signal: AbortSignal.timeout(10_000), cache: 'no-store',
-    })
-    const data = await res.json()
-    const u = data?.data?.userByAddress
-    if (!u) return []
-    const out: any[] = []
+    // Step 1: Get Pool address from PoolAddressesProvider.getPool()
+    const [poolRes] = await rpcBatch([ethCall(TYDRO_POOL_PROVIDER, '0x026b1d5f', 1)])
+    const poolHex = poolRes?.result
+    if (!poolHex || poolHex === '0x' || poolHex.length < 42) return []
+    const poolAddress = '0x' + poolHex.slice(2).slice(-40).toLowerCase()
 
-    for (const p of u.marketPositions ?? []) {
-      const supUSD = Number(p.supplyAssetsUsd ?? 0)
-      const borUSD = Number(p.borrowAssetsUsd ?? 0)
-      const colUSD = Number(p.collateralUsd ?? 0)
-      if (supUSD < 0.01 && borUSD < 0.01 && colUSD < 0.01) continue
-      const loanSym  = p.market?.loanAsset?.symbol ?? '?'
-      const collSym  = p.market?.collateralAsset?.symbol
-      const supplyApy = p.market?.state?.supplyApy ? Number(p.market.state.supplyApy) * 100 : 0
-      const borrowApy = p.market?.state?.borrowApy ? Number(p.market.state.borrowApy) * 100 : 0
-      const url = p.market?.uniqueKey
-        ? `https://app.morpho.org/ink/market?id=${p.market.uniqueKey}`
-        : 'https://app.morpho.org/ink'
-      out.push({
-        protocol: 'Morpho', type: 'lending', logo: '🦋',
-        url, chain: 'Ink',
-        label: collSym ? `${collSym} / ${loanSym}` : loanSym,
-        supply:     supUSD > 0.01 ? [{ symbol: loanSym, amountUSD: supUSD, apy: supplyApy }] : [],
-        collateral: colUSD > 0.01 ? [{ symbol: collSym, amountUSD: colUSD }] : [],
-        borrow:     borUSD > 0.01 ? [{ symbol: loanSym, amountUSD: borUSD, apr: borrowApy }] : [],
-        totalCollateralUSD: colUSD + supUSD,
-        totalDebtUSD: borUSD,
-        netValueUSD: colUSD + supUSD - borUSD,
-        healthFactor: p.healthFactor ? Number(p.healthFactor) : null,
-      })
+    // Step 2: Get reserves from Pool.getReservesList()
+    const [reservesRes] = await rpcBatch([ethCall(poolAddress, '0xd1946dbc', 2)])
+    if (!reservesRes?.result || reservesRes.result === '0x') return []
+
+    // Decode address[] (ABI-encoded dynamic array)
+    const hex = reservesRes.result.slice(2)
+    const offset = Number(BigInt('0x' + hex.slice(0, 64)))
+    const count  = Number(BigInt('0x' + hex.slice(offset * 2, offset * 2 + 64)))
+    if (count === 0 || count > 50) return []
+
+    const reserves: string[] = []
+    for (let i = 0; i < count; i++) {
+      const start = (offset + 1 + i) * 64
+      reserves.push(('0x' + hex.slice(start + 24, start + 64)).toLowerCase())
     }
 
-    for (const p of u.vaultPositions ?? []) {
-      const usd = Number(p.assetsUsd ?? 0)
-      if (usd < 0.01) continue
-      const url = p.vault?.address
-        ? `https://app.morpho.org/ink/vault?address=${p.vault.address}`
-        : 'https://app.morpho.org/ink'
-      out.push({
-        protocol: 'Morpho', type: 'vault', logo: '🦋',
-        url, chain: 'Ink',
-        label: p.vault?.name ?? p.vault?.symbol,
-        asset: p.vault?.asset?.symbol,
-        amountUSD: usd,
-        apy: p.vault?.state?.netApy ? Number(p.vault.state.netApy) * 100 : 0,
-        netValueUSD: usd,
-      })
+    // Step 3: Batch — getUserAccountData + getUserReserveData for each reserve
+    //   + symbol()/decimals() for tokens not in TOKEN_INFO
+    const userPadded = user.slice(2).toLowerCase().padStart(64, '0')
+    const calls: any[] = [
+      // Pool.getUserAccountData(user) → id=100
+      ethCall(poolAddress, '0xbf92857c' + userPadded, 100),
+    ]
+    // ProtocolDataProvider.getUserReserveData(asset, user) → id=200+i
+    for (let i = 0; i < reserves.length; i++) {
+      const assetPad = reserves[i].slice(2).padStart(64, '0')
+      calls.push(ethCall(TYDRO_DATA_PROVIDER, '0x28dd2d01' + assetPad + userPadded, 200 + i))
     }
-    return out
-  } catch { return [] }
+    // For unknown tokens, fetch symbol() and decimals()
+    const unknowns = reserves.filter(r => !TOKEN_INFO[r])
+    for (let i = 0; i < unknowns.length; i++) {
+      calls.push(ethCall(unknowns[i], '0x95d89b41', 300 + i * 2))   // symbol()
+      calls.push(ethCall(unknowns[i], '0x313ce567', 301 + i * 2))   // decimals()
+    }
+    const allRes = await rpcBatch(calls, 12_000)
+
+    // Resolve unknown tokens
+    for (let i = 0; i < unknowns.length; i++) {
+      const symR = allRes.find((r: any) => r.id === 300 + i * 2)
+      const decR = allRes.find((r: any) => r.id === 301 + i * 2)
+      if (symR?.result && symR.result.length > 130 && decR?.result) {
+        try {
+          const sh  = symR.result.slice(2)
+          const off = Number(BigInt('0x' + sh.slice(0, 64))) * 2
+          const len = Number(BigInt('0x' + sh.slice(off, off + 64)))
+          const sym = Buffer.from(sh.slice(off + 64, off + 64 + len * 2), 'hex').toString('utf8').replace(/\0/g, '')
+          const dec = Number(decodeUint(decR.result))
+          if (sym && dec >= 0 && dec <= 18) TOKEN_INFO[unknowns[i]] = { symbol: sym, decimals: dec }
+        } catch { /* skip */ }
+      }
+    }
+
+    // Parse getUserAccountData (6 × 32 bytes)
+    // [totalCollateralBase, totalDebtBase, availableBorrowsBase, liqThreshold, ltv, healthFactor]
+    // Base currency = USD with 8 decimals
+    const acctRes = allRes.find((r: any) => r.id === 100)
+    let totalCollateralUSD = 0, totalDebtUSD = 0, healthFactor: number | null = null
+    if (acctRes?.result && acctRes.result.length >= 2 + 6 * 64) {
+      const d = acctRes.result.slice(2)
+      totalCollateralUSD = Number(BigInt('0x' + d.slice(0, 64)))   / 1e8
+      totalDebtUSD       = Number(BigInt('0x' + d.slice(64, 128))) / 1e8
+      const hf = BigInt('0x' + d.slice(320, 384))
+      healthFactor = hf > 0n && hf < BigInt('0xffffffffffffffffffffff') ? Number(hf) / 1e18 : null
+    }
+
+    // Quick exit if user has no position
+    if (totalCollateralUSD < 0.01 && totalDebtUSD < 0.01) return []
+
+    // Parse per-reserve getUserReserveData (9 values × 32 bytes)
+    // [aTokenBal, stableDebt, varDebt, prinStable, scaledVar, stableRate, liquidityRate, lastUpdate, usedAsCollateral]
+    const supply: any[] = []
+    const borrow: any[] = []
+    const symbolsForPrice: string[] = []
+
+    for (let i = 0; i < reserves.length; i++) {
+      const r = allRes.find((x: any) => x.id === 200 + i)
+      if (!r?.result || r.result === '0x' || r.result.length < 2 + 9 * 64) continue
+      const d = r.result.slice(2)
+
+      const aTokenBal   = BigInt('0x' + d.slice(0,  64))
+      const stableDebt  = BigInt('0x' + d.slice(64, 128))
+      const varDebt     = BigInt('0x' + d.slice(128, 192))
+      const liqRate     = BigInt('0x' + d.slice(384, 448))
+
+      const info = TOKEN_INFO[reserves[i]] ?? { symbol: reserves[i].slice(0, 8), decimals: 18 }
+      const dec  = Math.pow(10, info.decimals)
+
+      const supAmt  = Number(aTokenBal)  / dec
+      const debtAmt = (Number(stableDebt) + Number(varDebt)) / dec
+      const supApy  = Number(liqRate) / 1e27 * 100  // RAY → %
+
+      if (supAmt > 0.001) {
+        supply.push({ symbol: info.symbol, amount: supAmt, amountUSD: 0, apy: Math.round(supApy * 100) / 100 })
+        if (!symbolsForPrice.includes(info.symbol)) symbolsForPrice.push(info.symbol)
+      }
+      if (debtAmt > 0.001) {
+        borrow.push({ symbol: info.symbol, amount: debtAmt, amountUSD: 0, apr: 0 })
+        if (!symbolsForPrice.includes(info.symbol)) symbolsForPrice.push(info.symbol)
+      }
+    }
+
+    // Fill USD amounts from CoinGecko prices
+    const prices = await getTokenPricesUSD(symbolsForPrice)
+    for (const s of supply) s.amountUSD = s.amount * (prices[s.symbol] ?? 0)
+    for (const b of borrow) b.amountUSD = b.amount * (prices[b.symbol] ?? 0)
+
+    const tokens = [...new Set([...supply.map(s => s.symbol), ...borrow.map(b => b.symbol)])]
+    return [{
+      protocol: 'Tydro', type: 'lending',
+      logo: 'https://icons.llamao.fi/icons/protocols/tydro?w=48&h=48',
+      url: 'https://app.tydro.com', chain: 'Ink',
+      label: tokens.join(' / ') || 'Tydro Lending',
+      supply, collateral: [], borrow,
+      totalCollateralUSD, totalDebtUSD,
+      netValueUSD: totalCollateralUSD - totalDebtUSD,
+      healthFactor,
+    }]
+  } catch (e) { console.error('[defi] Tydro error:', e); return [] }
 }
 
-// ─── UNISWAP V3 ───────────────────────────────────────────────────────────────
-const UNI_NFT_PM  = '0x7197e214c0b767cfb76fb734ab638e2c192f4e53'
-const UNI_FACTORY = '0x204faca1764b154221e35c0d20abb3c525710498'
-function tokenOfOwnerByIndex(owner: string, idx: bigint): string {
-  return '0x2f745c59' + owner.slice(2).toLowerCase().padStart(64, '0') + idx.toString(16).padStart(64, '0')
-}
-function positionsData(tokenId: bigint): string {
-  return '0x99fbab88' + tokenId.toString(16).padStart(64, '0')
-}
-function getPoolData(t0: string, t1: string, fee: number): string {
-  return '0x1698ee82' + t0.slice(2).toLowerCase().padStart(64, '0') + t1.slice(2).toLowerCase().padStart(64, '0') + fee.toString(16).padStart(64, '0')
-}
+// ═══════════════════════════════════════════════════════════════════════════════
+// VELODROME — AMM LP positions on Ink (v2 pools only; CL/v3 requires NFT enum)
+// ═══════════════════════════════════════════════════════════════════════════════
+const VELO_VOTER  = '0x97cDBCe21B6fd0585d29E539B1B99dAd328a1123'
+const GECKO_BASE  = 'https://api.geckoterminal.com/api/v2'
+const VELO_DEXES  = ['velodrome-finance-v2-ink', 'velodrome-finance-slipstream-ink']
 
-async function fetchUniswapV3(user: string, protocol: string, nftPM: string, factory: string): Promise<any[]> {
+async function fetchVelodrome(user: string): Promise<any[]> {
   try {
-    const balRes = await rpcBatch([ethCall(nftPM, balanceOfData(user), 1)])
-    const nftCount = Number(decodeUint(balRes[0]?.result ?? '0x'))
-    if (nftCount === 0) return []
-    const limit = Math.min(nftCount, 20)
-    const idCalls = Array.from({ length: limit }, (_, i) =>
-      ethCall(nftPM, tokenOfOwnerByIndex(user, BigInt(i)), i + 10))
-    const idResults = await rpcBatch(idCalls)
-    const tokenIds = idResults.map((r: any) => decodeUint(r?.result ?? '0x')).filter(id => id > 0n)
-    const posCalls = tokenIds.map((id, i) => ethCall(nftPM, positionsData(id), i + 200))
-    const posResults = await rpcBatch(posCalls)
+    // Step 1: Fetch Velodrome pools from GeckoTerminal
+    interface PoolMeta { address: string; base: string; quote: string; tvl: number; isCL: boolean }
+    const pools: PoolMeta[] = []
 
-    const poolCalls: object[] = []
-    const poolCallMap: Record<number, any> = {}
-    let pcIdx = 500
-
-    for (let i = 0; i < tokenIds.length; i++) {
-      const hex = posResults[i]?.result
-      if (!hex || hex === '0x' || hex.length < 10) continue
-      const d = hex.slice(2)
-      if (d.length < 64 * 8) continue
-      const w = Array.from({ length: 12 }, (_, j) => d.slice(j * 64, (j + 1) * 64))
-      const token0 = '0x' + w[2].slice(24)
-      const token1 = '0x' + w[3].slice(24)
-      const fee     = parseInt(w[4], 16)
-      const tL = parseInt(w[5], 16); const tickLower = tL > 0x7fffffff ? tL - 0x100000000 : tL
-      const tU = parseInt(w[6], 16); const tickUpper = tU > 0x7fffffff ? tU - 0x100000000 : tU
-      const liquidity = BigInt('0x' + w[7])
-      if (liquidity === 0n) continue
-      const t0sym = KNOWN_TOKENS[token0.toLowerCase()]?.symbol ?? token0.slice(0, 8)
-      const t1sym = KNOWN_TOKENS[token1.toLowerCase()]?.symbol ?? token1.slice(0, 8)
-      poolCalls.push(ethCall(factory, getPoolData(token0, token1, fee), pcIdx))
-      poolCallMap[pcIdx] = { tickLower, tickUpper, t0sym, t1sym, fee, liquidity }
-      pcIdx++
+    const fetches = VELO_DEXES.map(dex =>
+      fetch(`${GECKO_BASE}/networks/ink/dexes/${dex}/pools?page=1&sort=h24_volume_usd_desc`, {
+        signal: AbortSignal.timeout(10_000), headers: { Accept: 'application/json' },
+      }).then(r => r.ok ? r.json() : null).catch(() => null),
+    )
+    const results = await Promise.all(fetches)
+    for (const json of results) {
+      for (const p of json?.data ?? []) {
+        const addr = p.attributes?.address
+        if (!addr) continue
+        const tvl = parseFloat(p.attributes?.reserve_in_usd ?? '0')
+        if (tvl < 100) continue
+        const base  = p.relationships?.base_token?.data?.id?.split('_').pop()?.toUpperCase()  ?? ''
+        const quote = p.relationships?.quote_token?.data?.id?.split('_').pop()?.toUpperCase() ?? ''
+        const name  = (p.attributes?.name ?? '').toLowerCase()
+        const isCL  = name.includes('cl') || name.includes('concentrated') || name.includes('-0.')
+        // Skip CL pools — those are NFT-based, not ERC20 LP
+        if (isCL) continue
+        pools.push({ address: addr.toLowerCase(), base, quote, tvl, isCL })
+      }
     }
-    if (!poolCalls.length) return []
-    const poolAddrResults = await rpcBatch(poolCalls)
+    if (pools.length === 0) return []
 
-    const slot0Calls: object[] = []
-    const slot0Map: Record<number, any> = {}
-    let s0Idx = 600
-    for (const res of poolAddrResults) {
-      const info = poolCallMap[res.id]
-      if (!info || !res.result || res.result === '0x') continue
-      const poolAddr = decodeAddress(res.result)
-      if (poolAddr === '0x0000000000000000000000000000000000000000') continue
-      slot0Calls.push(ethCall(poolAddr, '0x3850c7bd', s0Idx))
-      slot0Map[s0Idx] = info
-      s0Idx++
+    // Step 2: Get gauge addresses from Voter.gauges(pool) for all pools
+    const gaugeCalls = pools.map((p, i) =>
+      ethCall(VELO_VOTER, '0xa7e60a4b' + p.address.slice(2).padStart(64, '0'), i),
+    )
+    const gaugeResults = await rpcBatch(gaugeCalls, 12_000)
+
+    const ZERO_ADDR = '0x' + '0'.repeat(40)
+    const gaugeMap = new Map<string, string>() // pool → gauge
+    for (let i = 0; i < pools.length; i++) {
+      const g = gaugeResults.find((r: any) => r.id === i)
+      if (!g?.result || g.result === '0x') continue
+      const gaugeAddr = ('0x' + g.result.slice(2).slice(-40)).toLowerCase()
+      if (gaugeAddr !== ZERO_ADDR) gaugeMap.set(pools[i].address, gaugeAddr)
     }
-    let slot0Results: any[] = []
-    if (slot0Calls.length) slot0Results = await rpcBatch(slot0Calls)
 
+    // Step 3: Batch balanceOf(user) for pool LP tokens + gauge contracts
+    const balCalls: any[] = []
+    const balMap: { idx: number; pool: PoolMeta; source: 'lp' | 'gauge' }[] = []
+    let idx = 0
+    for (const p of pools) {
+      // LP token balance (unstaked)
+      balCalls.push(ethCall(p.address, balanceOfData(user), idx))
+      balMap.push({ idx, pool: p, source: 'lp' })
+      idx++
+      // Gauge balance (staked)
+      const gauge = gaugeMap.get(p.address)
+      if (gauge) {
+        balCalls.push(ethCall(gauge, balanceOfData(user), idx))
+        balMap.push({ idx, pool: p, source: 'gauge' })
+        idx++
+      }
+    }
+    const balResults = await rpcBatch(balCalls, 12_000)
+
+    // Aggregate balances per pool (LP + gauge)
+    const userBalances = new Map<string, bigint>()
+    for (const { idx: id, pool } of balMap) {
+      const r = balResults.find((x: any) => x.id === id)
+      const bal = decodeUint(r?.result ?? '0x')
+      if (bal > 0n) {
+        userBalances.set(pool.address, (userBalances.get(pool.address) ?? 0n) + bal)
+      }
+    }
+    if (userBalances.size === 0) return []
+
+    // Step 4: Fetch totalSupply for pools where user has balance
+    const activePools = pools.filter(p => userBalances.has(p.address))
+    const tsCalls = activePools.map((p, i) =>
+      ethCall(p.address, '0x18160ddd', 500 + i), // totalSupply()
+    )
+    const tsResults = await rpcBatch(tsCalls)
+
+    // Step 5: Build positions — userShare = userBal / totalSupply × TVL
     const positions: any[] = []
-    for (const s0 of slot0Results) {
-      const info = slot0Map[s0.id]
-      if (!info || !s0.result || s0.result === '0x' || s0.result.length < 10) continue
-      const d  = s0.result.slice(2)
-      const w  = Array.from({ length: 4 }, (_, j) => d.slice(j * 64, (j + 1) * 64))
-      const ct = parseInt(w[1], 16); const currentTick = ct > 0x7fffffff ? ct - 0x100000000 : ct
-      const inRange = currentTick >= info.tickLower && currentTick <= info.tickUpper
+    for (let i = 0; i < activePools.length; i++) {
+      const p  = activePools[i]
+      const ts = decodeUint(tsResults.find((r: any) => r.id === 500 + i)?.result ?? '0x')
+      if (ts === 0n) continue
+      const userBal = userBalances.get(p.address) ?? 0n
+      const share   = Number(userBal) / Number(ts)
+      const usdVal  = share * p.tvl
+      if (usdVal < 0.01) continue
+
       positions.push({
-        protocol, type: 'liquidity',
-        logo: '🦄',
-        url: 'https://app.uniswap.org',
-        chain: 'Ink',
-        label: `${info.t0sym}/${info.t1sym} ${info.fee / 10000}%`,
-        tokens: [info.t0sym, info.t1sym],
-        inRange, tickLower: info.tickLower, tickUpper: info.tickUpper, currentTick,
-        netValueUSD: 0, amountUSD: 0,
+        protocol: 'Velodrome', type: 'liquidity',
+        logo: 'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48',
+        url: 'https://velodrome.finance/liquidity?chain=57073', chain: 'Ink',
+        label: `${p.base}/${p.quote}`,
+        tokens: [p.base, p.quote].filter(Boolean),
+        amountUSD: usdVal, apy: 0,
+        netValueUSD: usdVal, inRange: null,
       })
     }
     return positions
-  } catch { return [] }
+  } catch (e) { console.error('[defi] Velodrome error:', e); return [] }
 }
 
-// ─── CURVE ────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// INKYSWAP — AMM LP positions on Ink
+// ═══════════════════════════════════════════════════════════════════════════════
+const INKY_API = 'https://inkyswap.com/api'
+
+async function fetchInkySwap(user: string): Promise<any[]> {
+  try {
+    // Step 1: Get all pairs from InkySwap API
+    const res = await fetch(`${INKY_API}/pairs`, {
+      signal: AbortSignal.timeout(10_000), headers: { Accept: 'application/json' },
+    })
+    if (!res.ok) return []
+    const raw = await res.json()
+    const pairs: any[] = Array.isArray(raw) ? raw : (raw?.pairs ?? raw?.data ?? [])
+    if (pairs.length === 0) return []
+
+    // Extract pair addresses + metadata
+    interface PairMeta { address: string; base: string; quote: string; tvl: number; apr: number }
+    const pairList: PairMeta[] = []
+    for (const p of pairs) {
+      const addr = (p.pair_address ?? p.address ?? '').toLowerCase()
+      if (!addr || !addr.startsWith('0x')) continue
+      const tvl = parseFloat(p.liquidity_usd ?? p.tvl ?? '0')
+      if (tvl < 50) continue
+      pairList.push({
+        address: addr,
+        base:  p.token0?.symbol ?? '',
+        quote: p.token1?.symbol ?? '',
+        tvl,
+        apr: parseFloat(p.apr ?? '0'),
+      })
+    }
+    if (pairList.length === 0) return []
+
+    // Step 2: Batch balanceOf(user) for all pair LP tokens
+    const balCalls = pairList.map((p, i) => ethCall(p.address, balanceOfData(user), i))
+    const balResults = await rpcBatch(balCalls, 12_000)
+
+    // Filter to pairs where user has balance
+    const active: { pair: PairMeta; balance: bigint }[] = []
+    for (let i = 0; i < pairList.length; i++) {
+      const bal = decodeUint(balResults.find((r: any) => r.id === i)?.result ?? '0x')
+      if (bal > 0n) active.push({ pair: pairList[i], balance: bal })
+    }
+    if (active.length === 0) return []
+
+    // Step 3: Fetch totalSupply for active pairs
+    const tsCalls = active.map((a, i) => ethCall(a.pair.address, '0x18160ddd', 500 + i))
+    const tsResults = await rpcBatch(tsCalls)
+
+    // Step 4: Build positions
+    const positions: any[] = []
+    for (let i = 0; i < active.length; i++) {
+      const ts = decodeUint(tsResults.find((r: any) => r.id === 500 + i)?.result ?? '0x')
+      if (ts === 0n) continue
+      const { pair, balance } = active[i]
+      const share  = Number(balance) / Number(ts)
+      const usdVal = share * pair.tvl
+      if (usdVal < 0.01) continue
+
+      positions.push({
+        protocol: 'InkySwap', type: 'liquidity',
+        logo: 'https://icons.llamao.fi/icons/protocols/inkyswap?w=48&h=48',
+        url: 'https://inkyswap.com/liquidity', chain: 'Ink',
+        label: `${pair.base}/${pair.quote}`,
+        tokens: [pair.base, pair.quote].filter(Boolean),
+        amountUSD: usdVal, apy: pair.apr > 0 ? pair.apr : 0,
+        netValueUSD: usdVal, inRange: null,
+      })
+    }
+    return positions
+  } catch (e) { console.error('[defi] InkySwap error:', e); return [] }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CURVE — LP positions on Ink (kept from existing, confirmed working)
+// ═══════════════════════════════════════════════════════════════════════════════
 async function fetchCurve(user: string): Promise<any[]> {
-  // Curve on Ink mainnet — confirmed working:
-  //   API base : https://api-core.curve.finance/v1  (NOT api.curve.fi)
-  //   Slug     : "ink"
-  //   Pool types with data: factory-twocrypto (9), factory-stable-ng (17)
-  //   getLiquidityProviderData returns 404 for Ink → use on-chain balance check
   const BASE = 'https://api-core.curve.finance/v1'
-  const INK_RPC = 'https://rpc-gel.inkonchain.com'
   const addr = user.toLowerCase()
   const paddedAddr = addr.slice(2).padStart(64, '0')
 
@@ -285,54 +403,40 @@ async function fetchCurve(user: string): Promise<any[]> {
     }).then(r => r.json()).catch(() => ({ result: '0x0' })),
     ...poolTypes.map(t =>
       fetch(`${BASE}/getPools/ink/${t}`, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
-        .then(r => r.ok ? r.json() : null)
-        .catch(() => null)
+        .then(r => r.ok ? r.json() : null).catch(() => null),
     ),
   ])
-  const currentBlockHex = bnRes?.result ?? '0x0'
-  const BLOCKS_24H = 195_000
-  const currentBlock = Number(BigInt(currentBlockHex))
-  const fromBlock24h = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
+  const currentBlock = Number(BigInt(bnRes?.result ?? '0x0'))
+  const fromBlock24h = '0x' + Math.max(0, currentBlock - 195_000).toString(16)
 
-  // Flatten all pools into one list with metadata
   const allPools: any[] = []
-  for (const data of poolFetches) {
-    const pools = data?.data?.poolData ?? []
-    allPools.push(...pools)
-  }
+  for (const data of poolFetches) allPools.push(...(data?.data?.poolData ?? []))
   if (allPools.length === 0) return []
 
-  // Step 2: Batch balanceOf + fee() for all pools, plus eth_getLogs for TokenExchange events
+  // Step 2: Batch balanceOf + fee() + 24h trade logs
   const TE_CLASSIC = '0x8b3e96f2b889fa771c53c981b40daf005f63f637f1869f707052d15a3dd97140'
   const TE_NG      = '0x143f1f8e861fbdeddd5b46e844b7d3ac7b86a122f36e8c463859ee6811b1f29c'
 
   const balanceCalls = allPools.map((pool, i) => ({
-    jsonrpc: '2.0', id: i,
-    method: 'eth_call',
+    jsonrpc: '2.0', id: i, method: 'eth_call',
     params: [{ to: pool.lpTokenAddress ?? pool.address, data: '0x70a08231' + paddedAddr }, 'latest'],
   }))
   const feeCalls = allPools.map((pool, i) => ({
-    jsonrpc: '2.0', id: i + 1000,
-    method: 'eth_call',
-    params: [{ to: pool.address, data: '0xddca3f43' }, 'latest'], // fee()
+    jsonrpc: '2.0', id: i + 1000, method: 'eth_call',
+    params: [{ to: pool.address, data: '0xddca3f43' }, 'latest'],
   }))
 
   const [rpcRes, feeRes, logsRes] = await Promise.all([
     rpcBatch(balanceCalls, 10_000),
     rpcBatch(feeCalls, 8_000),
     rpcBatch([{
-      jsonrpc: '2.0', id: 9999,
-      method: 'eth_getLogs',
-      params: [{
-        fromBlock: fromBlock24h,
-        toBlock: 'latest',
-        address: allPools.map(p => p.address),
-        topics: [[TE_CLASSIC, TE_NG]],
-      }],
+      jsonrpc: '2.0', id: 9999, method: 'eth_getLogs',
+      params: [{ fromBlock: fromBlock24h, toBlock: 'latest',
+        address: allPools.map(p => p.address), topics: [[TE_CLASSIC, TE_NG]] }],
     }], 15_000),
   ])
 
-  // Aggregate 24h volume per pool from TokenExchange logs
+  // 24h volume per pool
   const logs: any[] = logsRes.find((r: any) => r.id === 9999)?.result ?? []
   const volumeByPool: Record<string, number> = {}
   for (const log of logs) {
@@ -342,15 +446,15 @@ async function fetchCurve(user: string): Promise<any[]> {
     try {
       const data = log.data?.slice(2) ?? ''
       if (data.length < 128) continue
-      const soldId    = Number(BigInt('0x' + data.slice(0, 64)))
+      const soldId     = Number(BigInt('0x' + data.slice(0, 64)))
       const tokensSold = BigInt('0x' + data.slice(64, 128))
-      const decimals  = Number(pool.coins?.[soldId]?.decimals ?? 18)
+      const decimals   = Number(pool.coins?.[soldId]?.decimals ?? 18)
       volumeByPool[poolAddr] = (volumeByPool[poolAddr] ?? 0) + Number(tokensSold) / Math.pow(10, decimals)
     } catch { /* skip */ }
   }
 
-  // Calculate APR per pool: (volume_24h × fee_rate × 365) / TVL × 100
-  const curveAprByPool: Record<string, number> = {}
+  // APR per pool: (vol24h × feeRate × 365) / TVL × 100
+  const aprByPool: Record<string, number> = {}
   allPools.forEach((pool, i) => {
     const tvl = Number(pool.usdTotalExcludingBasePool ?? pool.usdTotal ?? 0)
     if (tvl <= 0) return
@@ -358,462 +462,66 @@ async function fetchCurve(user: string): Promise<any[]> {
     const feeRate = Number(feeRaw) / 1e10
     const vol24h  = volumeByPool[pool.address?.toLowerCase()] ?? 0
     if (vol24h > 0 && feeRate > 0)
-      curveAprByPool[pool.address?.toLowerCase()] = (vol24h * feeRate * 365 / tvl) * 100
+      aprByPool[pool.address?.toLowerCase()] = (vol24h * feeRate * 365 / tvl) * 100
   })
 
-  // Step 3: Build positions only for pools where user has balance
+  // Step 3: Build positions for pools where user has LP balance
   const positions: any[] = []
   for (let i = 0; i < allPools.length; i++) {
     const result = rpcRes.find((r: any) => r.id === i)?.result ?? '0x'
     if (!result || result === '0x' || result === '0x' + '0'.repeat(64)) continue
-
     const balanceRaw = BigInt(result)
     if (balanceRaw === 0n) continue
 
     const pool = allPools[i]
     const totalSupplyRaw = BigInt(pool.totalSupply ?? '0')
     const lpPrice = Number(pool.lpTokenPrice ?? 0)
-
-    // User's USD value = (userBalance / totalSupply) * poolUsdTotal
-    // Or simpler: userBalance (18 dec) * lpTokenPrice
-    const userBalanceFloat = Number(balanceRaw) / 1e18
+    const userBalFloat = Number(balanceRaw) / 1e18
     const netValueUSD = lpPrice > 0
-      ? userBalanceFloat * lpPrice
+      ? userBalFloat * lpPrice
       : totalSupplyRaw > 0n
         ? (Number(balanceRaw) / Number(totalSupplyRaw)) * Number(pool.usdTotalExcludingBasePool ?? pool.usdTotal ?? 0)
         : 0
-
     if (netValueUSD < 0.01) continue
 
-    const coins = pool.coins?.map((c: any) => c.symbol) ?? []
+    const coins  = pool.coins?.map((c: any) => c.symbol) ?? []
     const poolId = pool.id ?? pool.address
     positions.push({
-      protocol: 'Curve', type: 'liquidity', logo: '🌊',
+      protocol: 'Curve', type: 'liquidity',
+      logo: 'https://icons.llamao.fi/icons/protocols/curve-dex?w=48&h=48',
       url: `https://curve.finance/dex/ink/pools/${poolId}/deposit`, chain: 'Ink',
       label: pool.name ?? coins.join('/'),
       tokens: coins,
       amountUSD: netValueUSD,
-      apy: curveAprByPool[pool.address?.toLowerCase()] ?? 0,
-      netValueUSD,
-      inRange: null,
+      apy: aprByPool[pool.address?.toLowerCase()] ?? 0,
+      netValueUSD, inRange: null,
     })
   }
-
   return positions
 }
 
-// ─── GEARBOX ──────────────────────────────────────────────────────────────────
-// Gearbox Permissionless is deployed on Ink mainnet (curated by Edge: $50M+ peak TVL)
-// Their permissionless API is at permissionless.gearbox.foundation
-// The Gearbox permissionless architecture uses AddressProvider + Pool registry
-async function fetchGearbox(user: string): Promise<any[]> {
-  // Gearbox permissionless uses a different API than classic Gearbox
-  // Try permissionless API endpoints for Ink (chainId=57073)
-  const endpoints = [
-    `https://api.gearbox.finance/api/v1/user/${user.toLowerCase()}/pools?chainId=57073`,
-    `https://pf-api.gearbox.finance/api/v1/user/${user.toLowerCase()}/positions?chain=ink`,
-  ]
-  for (const url of endpoints) {
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
-      if (!res.ok) continue
-      const data = await res.json()
-      const positions = data?.data ?? data?.positions ?? data?.pools ?? []
-      if (Array.isArray(positions) && positions.length >= 0) {
-        return positions
-          .filter((p: any) => Number(p.valueUsd ?? p.amountUsd ?? p.lpValueUsd ?? 0) > 0.01)
-          .map((p: any) => ({
-            protocol: 'Gearbox', type: 'vault', logo: '⚙️',
-            url: 'https://permissionless.gearbox.foundation', chain: 'Ink',
-            label: p.poolName ?? p.symbol ?? p.name ?? 'Lending Pool',
-            asset: p.asset ?? p.underlying ?? p.symbol,
-            amountUSD: Number(p.valueUsd ?? p.amountUsd ?? 0),
-            apy: p.apy ? Number(p.apy) * 100 : 0,
-            netValueUSD: Number(p.valueUsd ?? p.amountUsd ?? 0),
-          }))
-      }
-    } catch { /* try next */ }
-  }
-  return []
-}
-
-// ─── UPSHIFT ──────────────────────────────────────────────────────────────────
-// TODO: Re-add Upshift when Ink-specific vault addresses are confirmed
-// The previous vault (earnAUSD) was Monad-specific
-async function fetchUpshift(_user: string): Promise<any[]> {
-  return [] // Placeholder — waiting for Ink-specific Upshift vault addresses
-}
-
-// ─── FRAX (frxETH) ─────────────────────────────────────────────────────────
-// frxETH on Ink: 0x43eDD7f3831b08FE70B7555ddD373C8bF65a9050
-const FRAX_FRXETH = '0x43eDD7f3831b08FE70B7555ddD373C8bF65a9050'
-async function fetchFraxFrxETH(user: string, ethPrice: number): Promise<any[]> {
-  try {
-    const balRes = await rpcBatch([ethCall(FRAX_FRXETH, balanceOfData(user), 810)])
-    const shares = decodeUint(balRes[0]?.result ?? '0x')
-    if (shares === 0n) return []
-    const sharesFloat = Number(shares) / 1e18
-    // convertToAssets(shares) → 0x07a2d13a
-    const redeemRes = await rpcBatch([ethCall(FRAX_FRXETH, '0x07a2d13a' + shares.toString(16).padStart(64, '0'), 811)])
-    const ethAmt = Number(decodeUint(redeemRes[0]?.result ?? '0x')) / 1e18 || sharesFloat
-    const usd = ethAmt * ethPrice
-    if (sharesFloat < 0.001) return []
-    return [{
-      protocol: 'Frax', type: 'vault', logo: '⚡',
-      url: 'https://app.frax.finance', chain: 'Ink',
-      label: 'Frax Ether', asset: 'frxETH',
-      amount: sharesFloat, amountUSD: usd, apy: 0, netValueUSD: usd,
-    }]
-  } catch { return [] }
-}
-
-// ─── Frax sfrxETH ─────────────────────────────────────────────────────────────────
-const FRAX_SFRXETH_ADDR = '0x3ec3849c33291a9ef4c5db86de593eb4a37fde45'
-async function fetchFraxSfrxETH(user: string, ethPrice: number): Promise<any[]> {
-  try {
-    const balRes = await rpcBatch([ethCall(FRAX_SFRXETH_ADDR, balanceOfData(user), 820)])
-    const shares = decodeUint(balRes[0]?.result ?? '0x')
-    if (shares === 0n) return []
-    const sharesFloat = Number(shares) / 1e18
-    const redeemRes = await rpcBatch([ethCall(FRAX_SFRXETH_ADDR, '0x4cdad506' + shares.toString(16).padStart(64, '0'), 821)])
-    const ethAmt = Number(decodeUint(redeemRes[0]?.result ?? '0x')) / 1e18 || sharesFloat
-    const usd = ethAmt * ethPrice
-    if (sharesFloat < 0.001) return []
-    return [{
-      protocol: 'Frax', type: 'vault', logo: '⚡',
-      url: 'https://app.frax.finance', chain: 'Ink',
-      label: 'Staked Frax ETH', asset: 'sfrxETH',
-      amount: sharesFloat, amountUSD: usd, apy: 0, netValueUSD: usd,
-    }]
-  } catch { return [] }
-}
-
-// ─── LAGOON FINANCE ───────────────────────────────────────────────────────────
-// Lagoon deploys ERC7540 vaults permissionlessly via BeaconProxyFactory
-// Confirmed $3.42M TVL on Ink per DefiLlama
-// No public REST API — must query vaults on-chain (addresses not yet publicly listed)
-async function fetchLagoon(user: string): Promise<any[]> {
-  // Confirmed working endpoint (found via debug-all): app.lagoon.finance/api/vaults?chainId=57073
-  // Returns all vaults; we check user LP balance on-chain for each
-  const addr = user.toLowerCase()
-  const paddedAddr = addr.slice(2).padStart(64, '0')
-
-  try {
-    // Step 1: Get all Lagoon vaults on Ink
-    const res = await fetch('https://app.lagoon.finance/api/vaults?chainId=57073', {
-      signal: AbortSignal.timeout(8_000), cache: 'no-store',
-    })
-    if (!res.ok) return []
-    const data = await res.json()
-    const vaults: any[] = data?.vaults ?? data ?? []
-    if (vaults.length === 0) return []
-
-    // Step 2: Batch balanceOf for all vaults
-    const balCalls = vaults.map((v: any, i: number) => ethCall(v.address, '0x70a08231' + paddedAddr, i))
-    const balResults = await rpcBatch(balCalls)
-
-    // Step 3: For vaults with balance, fetch sharePrice via totalAssets/totalSupply
-    const positions: any[] = []
-    for (let i = 0; i < vaults.length; i++) {
-      const v = vaults[i]
-      const shares = decodeUint(balResults.find((r: any) => r.id === i)?.result ?? '0x')
-      if (shares === 0n) continue
-
-      // Get totalAssets and totalSupply to compute share price
-      const [taRes, tsRes] = await rpcBatch([
-        ethCall(v.address, '0x01e1d114', 500), // totalAssets()
-        ethCall(v.address, '0x18160ddd', 501), // totalSupply()
-      ])
-      const totalAssets = decodeUint(taRes?.result ?? '0x')
-      const totalSupply = decodeUint(tsRes?.result ?? '0x')
-      const decimals = Number(v.decimals ?? 18)
-      const shareFloat = Number(shares) / Math.pow(10, decimals)
-      let amountUSD = 0
-      if (totalSupply > 0n) {
-        const ratio = Number(totalAssets) / Number(totalSupply)
-        amountUSD = shareFloat * ratio // underlying tokens, assume ≈ $1 for stables
-      }
-      if (amountUSD < 0.01 && shareFloat < 0.001) continue
-
-      positions.push({
-        protocol: 'Lagoon', type: 'vault', logo: '🏝️',
-        url: `https://app.lagoon.finance/vault/57073/${v.address}`, chain: 'Ink',
-        label: v.name ?? v.symbol ?? 'Lagoon Vault',
-        asset: v.symbol,
-        amountUSD,
-        apy: v.apy ? Number(v.apy) * 100 : 0,
-        netValueUSD: amountUSD,
-      })
-    }
-    return positions
-  } catch { return [] }
-}
-
-// ─── RENZO (ezETH on Ink) ───────────────────────────────────────────────────
-// Renzo integrates with Curvance on Ink; ezETH is bridged
-// Try Renzo API
-async function fetchRenzo(_user: string): Promise<any[]> {
-  // Renzo (ezETH restaking) is not yet deployed on Ink mainnet — returning empty until official launch
-  return []
-}
-
-// ─── KURU (CLOB DEX Vault LP positions) ──────────────────────────────────────
-// Official Ink mainnet contracts from ink contracts repository:
-// Vault:  0x4869a4c7657cef5e5496c9ce56dde4cd593e4923
-// Vault2: 0xd6eae39b96fbdb7daa2227829be34b4e1bc9069a
-// These are ERC4626-like vaults: balanceOf(user) = LP shares
-// totalAssets() / totalSupply() gives share-to-asset ratio
-const KURU_VAULTS = [
-  { address: '0x4869a4c7657cef5e5496c9ce56dde4cd593e4923', name: 'Kuru LP Vault', asset: 'USDC', decimals: 6 },
-  { address: '0xd6eae39b96fbdb7daa2227829be34b4e1bc9069a', name: 'Kuru LP Vault 2', asset: 'USDC', decimals: 6 },
-]
-// totalAssets() selector = 0x01e1d114, totalSupply() = 0x18160ddd
-async function fetchKuru(user: string): Promise<any[]> {
-  try {
-    const calls: any[] = []
-    KURU_VAULTS.forEach((v, i) => {
-      calls.push(ethCall(v.address, balanceOfData(user), 900 + i * 3))
-      calls.push(ethCall(v.address, '0x01e1d114', 901 + i * 3)) // totalAssets
-      calls.push(ethCall(v.address, '0x18160ddd', 902 + i * 3)) // totalSupply
-    })
-    const results = await rpcBatch(calls)
-    const items: any[] = []
-    KURU_VAULTS.forEach((v, i) => {
-      const shares = decodeUint(results.find((r: any) => r.id === 900 + i * 3)?.result ?? '0x')
-      if (shares === 0n) return
-      const totalAssets = decodeUint(results.find((r: any) => r.id === 901 + i * 3)?.result ?? '0x')
-      const totalSupply = decodeUint(results.find((r: any) => r.id === 902 + i * 3)?.result ?? '0x')
-      if (totalSupply === 0n) return
-      // Calculate underlying asset amount
-      const assetAmount = Number(shares * totalAssets / totalSupply) / Math.pow(10, v.decimals)
-      if (assetAmount < 0.01) return
-      items.push({
-        protocol: 'Kuru', type: 'liquidity', logo: '🌀',
-        url: 'https://app.kuru.io', chain: 'Ink',
-        label: v.name,
-        tokens: [v.asset],
-        amountUSD: assetAmount, // USDC ≈ $1
-        apy: 0,
-        netValueUSD: assetAmount,
-        inRange: null,
-      })
-    })
-    return items
-  } catch { return [] }
-}
-
-// ─── CURVANCE ─────────────────────────────────────────────────────────────────────────────
-// High-LTV lending on Ink. On-chain via cToken contracts.
-// Collateral: cgXXX tokens, balanceOf(user) = deposited amount 1:1
-// Debt: selector 0x21570256(user) returns 6x32-byte snapshot, word[5] = borrowAmount
-// Confirmed from borrow tx 0x8f98c1...: returns test data for test user
-
-const CURVANCE_CTOKENS: Record<string, { underlying: string; decimals: number; market: string }> = {
-  '0xD9E2025b907E95EcC963A5018f56B87575B4aB26': { underlying: 'CRV', decimals: 18, market: 'CRV/WETH' },
-  '0x926C101Cf0a3dE8725Eb24a93E980f9FE34d6230': { underlying: 'FXS',  decimals: 18, market: 'FXS/WETH'  },
-  '0x494876051B0E85dCe5ecd5822B1aD39b9660c928': { underlying: 'sfrxETH',   decimals: 18, market: 'sfrxETH/WETH'   },
-  '0x5ca6966543c0786f547446234492d2f11c82f11f': { underlying: 'frxETH',   decimals: 18, market: 'frxETH/WETH'   },
-}
-
-const CURVANCE_DEBT_CTOKENS: Record<string, { underlying: string; decimals: number; market: string }> = {
-  '0xf473568b26b8c5aadca9fbc0ea17e1728d5ec925': { underlying: 'WETH', decimals: 18, market: 'frxETH/WETH'   },
-  '0xF32B334042DC1EB9732454cc9bc1a06205d184f2': { underlying: 'WETH', decimals: 18, market: 'CRV/WETH' },
-  '0x0fcEd51b526BfA5619F83d97b54a57e3327eB183': { underlying: 'WETH', decimals: 18, market: 'FXS/WETH'  },
-  '0xebE45A6ceA7760a71D8e0fa5a0AE80a75320D708': { underlying: 'WETH', decimals: 18, market: 'sfrxETH/WETH'   },
-}
-
-async function fetchCurvance(user: string): Promise<any[]> {
-  try {
-    const collateralAddrs = Object.keys(CURVANCE_CTOKENS)
-    const debtAddrs       = Object.keys(CURVANCE_DEBT_CTOKENS)
-    const userPadded      = user.slice(2).toLowerCase().padStart(64, '0')
-
-    const calls = [
-      ...collateralAddrs.map((addr, i) => ethCall(addr, balanceOfData(user), i)),
-      ...debtAddrs.map((addr, i) => ethCall(addr, '0x21570256' + userPadded, 100 + i)),
-    ]
-    const results = await rpcBatch(calls)
-
-    const markets: Record<string, { collateral: any[]; debt: any[] }> = {}
-    const allSymbols: string[] = []
-
-    collateralAddrs.forEach((addr, i) => {
-      const info   = CURVANCE_CTOKENS[addr]
-      const balRaw = decodeUint(results.find((r: any) => r.id === i)?.result ?? '0x')
-      if (balRaw === 0n) return
-      if (!markets[info.market]) markets[info.market] = { collateral: [], debt: [] }
-      const amount = Number(balRaw) / 1e18
-      markets[info.market].collateral.push({ symbol: info.underlying, amount, amountUSD: 0 })
-      if (!allSymbols.includes(info.underlying)) allSymbols.push(info.underlying)
-    })
-
-    debtAddrs.forEach((addr, i) => {
-      const info = CURVANCE_DEBT_CTOKENS[addr]
-      const raw  = results.find((r: any) => r.id === 100 + i)?.result ?? '0x'
-      if (!raw || raw === '0x' || raw.length < 2 + 6 * 64) return
-      const hex       = raw.slice(2)
-      const borrowRaw = BigInt('0x' + hex.slice(5 * 64, 6 * 64))
-      if (borrowRaw === 0n) return
-      if (!markets[info.market]) markets[info.market] = { collateral: [], debt: [] }
-      const amount = Number(borrowRaw) / 1e18
-      markets[info.market].debt.push({ symbol: info.underlying, amount, amountUSD: 0 })
-      if (!allSymbols.includes(info.underlying)) allSymbols.push(info.underlying)
-    })
-
-    if (!Object.keys(markets).length) return []
-
-    const prices = await getTokenPricesUSD(allSymbols)
-
-    return Object.entries(markets).map(([marketName, { collateral, debt }]) => {
-      let totalCollateralUSD = 0
-      for (const c of collateral) {
-        c.amountUSD = c.amount * (prices[c.symbol] ?? 0)
-        totalCollateralUSD += c.amountUSD
-      }
-      let totalDebtUSD = 0
-      for (const d of debt) {
-        d.amountUSD = d.amount * (prices[d.symbol] ?? 0)
-        totalDebtUSD += d.amountUSD
-      }
-
-      const healthFactor = totalDebtUSD > 0
-        ? (totalCollateralUSD * 0.975) / totalDebtUSD
-        : null
-
-      return {
-        protocol: 'Curvance', type: 'lending', logo: '💎',
-        url: 'https://app.curvance.com', chain: 'Ink',
-        label: marketName,
-        supply: collateral, borrow: debt,
-        totalCollateralUSD, totalDebtUSD,
-        netValueUSD: totalCollateralUSD - totalDebtUSD,
-        healthFactor,
-      }
-    })
-  } catch { return [] }
-}
-
-// ─── EULER V2 ─────────────────────────────────────────────────────────────────
-// Modular lending with EVC (Ethereum Vault Connector). GraphQL API.
-async function fetchEulerV2(user: string): Promise<any[]> {
-  const query = `query($account:String!,$chainId:Int!){
-    userPositions(where:{account:$account,chainId:$chainId}){
-      vault{address name asset{symbol decimals}}
-      supplyShares supplyAssetsUsd
-      borrowShares borrowAssetsUsd
-      healthScore
-    }
-  }`
-  try {
-    const res = await fetch('https://api.euler.finance/graphql', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables: { account: user.toLowerCase(), chainId: 57073 } }),
-      signal: AbortSignal.timeout(10_000), cache: 'no-store',
-    })
-    if (!res.ok) return []
-    const data = await res.json()
-    const positions = data?.data?.userPositions ?? []
-    return positions
-      .filter((p: any) => {
-        const sup = Number(p.supplyAssetsUsd ?? 0)
-        const bor = Number(p.borrowAssetsUsd ?? 0)
-        return sup + bor > 0.01
-      })
-      .map((p: any) => {
-        const supUSD = Number(p.supplyAssetsUsd ?? 0)
-        const borUSD = Number(p.borrowAssetsUsd ?? 0)
-        const sym = p.vault?.asset?.symbol ?? '?'
-        return {
-          protocol: 'Euler V2', type: 'lending', logo: '📐',
-          url: 'https://app.euler.finance', chain: 'Ink',
-          label: p.vault?.name ?? sym,
-          supply: supUSD > 0.01 ? [{ symbol: sym, amountUSD: supUSD }] : [],
-          collateral: [],
-          borrow: borUSD > 0.01 ? [{ symbol: sym, amountUSD: borUSD }] : [],
-          totalCollateralUSD: supUSD, totalDebtUSD: borUSD,
-          netValueUSD: supUSD - borUSD,
-          healthFactor: p.healthScore ? Number(p.healthScore) : null,
-        }
-      })
-  } catch { return [] }
-}
-
-// ─── MIDAS RWA ────────────────────────────────────────────────────────────────
-// Tokenized T-Bills (mTBILL) and Basis trading (mBASIS). Price ≈ $1 (treasury peg).
-// Contract addresses on Ink mainnet (from DefiLlama $7.11M TVL tracking)
-// TODO: Find correct Midas contract addresses on Ink mainnet
-// Current addresses return totalSupply = 0 — contracts are wrong or not deployed
-// Check: https://midas.app or Ink Explorer for mTBILL/mBASIS deployments
-const MIDAS_TOKENS: { address: string; symbol: string; decimals: number; apy: number }[] = [
-  // Addresses to be confirmed — leaving empty until correct addresses found
-]
-async function fetchMidas(user: string): Promise<any[]> {
-  try {
-    const calls = MIDAS_TOKENS.map((t, i) => ethCall(t.address, balanceOfData(user), i + 900))
-    const results = await rpcBatch(calls)
-    const positions: any[] = []
-    MIDAS_TOKENS.forEach((t, i) => {
-      const bal = decodeUint(results[i]?.result ?? '0x')
-      if (bal === 0n) return
-      const amount = Number(bal) / Math.pow(10, t.decimals)
-      if (amount < 0.001) return
-      // mTBILL/mBASIS price ≈ $1 (T-bill backed)
-      const amountUSD = amount
-      positions.push({
-        protocol: 'Midas', type: 'vault', logo: '🏛️',
-        url: 'https://midas.app', chain: 'Ink',
-        label: t.symbol === 'mTBILL' ? 'Tokenized US T-Bills' : 'Basis Trading Strategy',
-        asset: t.symbol, amount, amountUSD, apy: t.apy, netValueUSD: amountUSD,
-      })
-    })
-    return positions
-  } catch { return [] }
-}
-
-// ─── PNL calculation helper ──────────────────────────────────────────────────
-// PNL for lending = netValueUSD vs deposited (hard to get without historical, expose as null)
-// PNL for vaults = amountUSD - cost basis (only if entry data available from the protocol API)
-// We attach pnl: null by default; protocols that return cost basis can populate it
-
-// ─── MAIN ─────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN — 4 protocols in parallel
+// ═══════════════════════════════════════════════════════════════════════════════
 export async function GET(req: NextRequest) {
   const address = req.nextUrl.searchParams.get('address')
-  if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
+  if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address))
     return NextResponse.json({ error: 'Invalid address' }, { status: 400 })
-  }
 
-  const [ethPriceR] = await Promise.allSettled([getEthPrice()])
-  const ETH_PRICE = ethPriceR.status === 'fulfilled' ? (ethPriceR.value as number) : 0
-
-  const [aaveR, morphoR, uniR, curveR, gearR, upshiftR, fraxFrxR, fraxSfrxR, lagoonR, renzoR, kuruR, curvanceR, eulerR, midasR] =
-    await Promise.allSettled([
-      fetchAave(address),
-      fetchMorpho(address),
-      fetchUniswapV3(address, 'Uniswap V3',   UNI_NFT_PM, UNI_FACTORY),
-      fetchCurve(address),
-      fetchGearbox(address),
-      fetchUpshift(address),
-      fetchFraxFrxETH(address, ETH_PRICE),
-      fetchFraxSfrxETH(address, ETH_PRICE),
-      fetchLagoon(address),
-      fetchRenzo(address),
-      fetchKuru(address),
-      fetchCurvance(address),
-      fetchEulerV2(address),
-      fetchMidas(address),
-    ])
+  const [tydroR, veloR, inkyR, curveR] = await Promise.allSettled([
+    fetchTydro(address),
+    fetchVelodrome(address),
+    fetchInkySwap(address),
+    fetchCurve(address),
+  ])
 
   function unwrap(r: PromiseSettledResult<any[]>): any[] {
     return r.status === 'fulfilled' ? r.value : []
   }
 
   const allPositions = [
-    ...unwrap(aaveR), ...unwrap(morphoR), ...unwrap(uniR),
-    ...unwrap(curveR), ...unwrap(gearR), ...unwrap(upshiftR),
-    ...unwrap(fraxFrxR), ...unwrap(fraxSfrxR),
-    ...unwrap(lagoonR), ...unwrap(renzoR), ...unwrap(kuruR),
-    ...unwrap(curvanceR), ...unwrap(eulerR), ...unwrap(midasR),
+    ...unwrap(tydroR), ...unwrap(veloR),
+    ...unwrap(inkyR),  ...unwrap(curveR),
   ]
 
   const totalNetValueUSD = allPositions.reduce((s, p) => s + (p.netValueUSD ?? 0), 0)
@@ -823,6 +531,6 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     positions: allPositions,
-    summary: { totalNetValueUSD, totalDebtUSD, totalSupplyUSD, netValueUSD: totalNetValueUSD, activeProtocols, ethPrice: ETH_PRICE },
+    summary: { totalNetValueUSD, totalDebtUSD, totalSupplyUSD, netValueUSD: totalNetValueUSD, activeProtocols },
   })
 }
