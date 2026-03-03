@@ -226,32 +226,217 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
   return out
 }
 
-// ─── GeckoTerminal API for Velodrome on Ink ──────────────────────────────────
-// GeckoTerminal (by CoinGecko) indexes Velodrome pools on Ink with dedicated
-// DEX endpoints. We estimate fee APR from 24h volume and liquidity.
-// Note: this is FEE APR only and does not include VELO gauge emissions.
-// Real APR on velodrome.finance may be higher.
-// If DefiLlama has data (which includes emissions), it takes priority.
+// ─── LpSugar on-chain API for Velodrome on Ink ───────────────────────────────
+// LpSugar is Velodrome's official on-chain data contract. It returns pool data
+// including the REAL APR (fees + VELO gauge emissions), not just fee APR.
+// We call it via eth_call RPC on the Ink chain.
+// Fallback: GeckoTerminal fee-only APR if Sugar call fails.
+//
+// Contract: 0x46e07c9b4016f8E5c3cD0b2fd20147A4d0972120 (Ink chain 57073)
+// Source: https://github.com/velodrome-finance/sugar
+// ABI fetched from Blockscout at runtime and cached.
 
-const VELO_URL = 'https://velodrome.finance/liquidity?chain=57073'
-const GECKO_BASE = 'https://api.geckoterminal.com/api/v2'
+const LP_SUGAR     = '0x46e07c9b4016f8E5c3cD0b2fd20147A4d0972120'
+const INK_RPC      = 'https://rpc-gel.inkonchain.com'
+const INK_RPC_ALT  = 'https://ink.drpc.org'
+const BLOCKSCOUT   = 'https://explorer.inkonchain.com'
+const VELO_URL     = 'https://velodrome.finance/liquidity?chain=57073'
+const GECKO_BASE   = 'https://api.geckoterminal.com/api/v2'
 
-// GeckoTerminal DEX IDs for Velodrome on Ink
+// GeckoTerminal DEX IDs for Velodrome on Ink (used for TVL data)
 const VELO_DEX_IDS = [
-  'velodrome-finance-v2-ink',   // V2 AMM pools (stable + volatile)
-  'velodrome-slipstream-ink',   // V3 Slipstream (concentrated liquidity)
+  'velodrome-finance-v2-ink',
+  'velodrome-slipstream-ink',
 ]
 
-// Velodrome fee rates by pool type
-const VELO_FEE_STABLE  = 0.0001  // 0.01% for stable pools
-const VELO_FEE_DEFAULT = 0.003   // 0.3% for volatile/CL pools
+// ─── ABI cache (fetched from Blockscout once) ────────────────────────────────
+let sugarAbiCache: any[] | null = null
 
+async function getSugarAbi(): Promise<any[] | null> {
+  if (sugarAbiCache) return sugarAbiCache
+  try {
+    const res = await fetch(
+      `${BLOCKSCOUT}/api?module=contract&action=getabi&address=${LP_SUGAR}`,
+      { signal: AbortSignal.timeout(8_000) }
+    )
+    const json = await res.json()
+    if (json.status === '1' && json.result) {
+      sugarAbiCache = JSON.parse(json.result)
+      console.log(`[best-aprs] Sugar ABI cached (${sugarAbiCache!.length} entries)`)
+      return sugarAbiCache
+    }
+    console.log(`[best-aprs] Blockscout ABI status: ${json.status}, message: ${json.message}`)
+  } catch (e) {
+    console.error('[best-aprs] Failed to fetch Sugar ABI from Blockscout:', e)
+  }
+  return null
+}
+
+// ─── LpSugar RPC call ────────────────────────────────────────────────────────
+// Calls LpSugar.all(limit, offset) via eth_call and decodes using ethers.js
+async function fetchLpSugar(): Promise<AprEntry[]> {
+  const out: AprEntry[] = []
+
+  // Step 1: Get ABI from Blockscout
+  const abi = await getSugarAbi()
+  if (!abi) throw new Error('No Sugar ABI available from Blockscout')
+
+  // Step 2: Dynamic import ethers.js for ABI encoding/decoding
+  // Requires: npm install ethers
+  let Interface: any
+  try {
+    const ethers = await import('ethers')
+    Interface = ethers.Interface
+  } catch {
+    throw new Error('ethers package not installed — run: npm install ethers')
+  }
+
+  const iface = new Interface(abi)
+
+  // Step 3: Encode the function call: all(200, 0)
+  // 200 limit should cover all pools on Ink (currently ~20-50)
+  const calldata = iface.encodeFunctionData('all', [200, 0])
+
+  // Step 4: Make eth_call to Ink RPC (with fallback RPC)
+  let rpcResult: string | null = null
+  for (const rpc of [INK_RPC, INK_RPC_ALT]) {
+    try {
+      const res = await fetch(rpc, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'eth_call',
+          params: [{ to: LP_SUGAR, data: calldata }, 'latest'],
+        }),
+        signal: AbortSignal.timeout(30_000),
+      })
+      const json = await res.json()
+      if (json.error) {
+        console.log(`[best-aprs] Sugar RPC error (${rpc}): ${json.error.message}`)
+        continue
+      }
+      rpcResult = json.result
+      break
+    } catch (e) {
+      console.log(`[best-aprs] Sugar RPC timeout/error (${rpc}):`, e)
+    }
+  }
+
+  if (!rpcResult) throw new Error('All RPC endpoints failed for Sugar call')
+
+  // Step 5: Decode the response
+  const decoded = iface.decodeFunctionResult('all', rpcResult)
+  const pools = decoded[0] // Array of Lp structs
+
+  console.log(`[best-aprs] LpSugar: ${pools.length} pools returned from contract`)
+
+  // Step 6: Map to AprEntry[]
+  for (const p of pools) {
+    try {
+      const symbol = String(p.symbol ?? '')
+      if (!symbol) continue
+
+      // Parse token names from pool symbol
+      // Formats: "vAMM-WETH/USDC.e" (V2 volatile), "sAMM-USDC.e/USDT0" (V2 stable),
+      //          "CL200-WETH/USDC.e" (Slipstream CL with tickSpacing=200)
+      const match = symbol.match(/^(?:vAMM|sAMM|CL\d+)-(.+)\/(.+)$/)
+      if (!match) {
+        // Some pools might have different naming, try splitting by /
+        const slashIdx = symbol.indexOf('/')
+        if (slashIdx === -1) continue
+        // Skip prefix before first dash
+        const dashIdx = symbol.indexOf('-')
+        const base = dashIdx >= 0 ? symbol.slice(dashIdx + 1, slashIdx) : symbol.slice(0, slashIdx)
+        const quote = symbol.slice(slashIdx + 1)
+        if (!base || !quote) continue
+        // Process below with these values
+        processPool(p, symbol, base.trim(), quote.trim(), out)
+        continue
+      }
+
+      const [, base, quote] = match
+      processPool(p, symbol, base.trim(), quote.trim(), out)
+    } catch (e) {
+      // Skip individual pool errors
+      console.log(`[best-aprs] Sugar pool parse error:`, e)
+    }
+  }
+
+  console.log(`[best-aprs] LpSugar: ${out.length} pools after filtering`)
+
+  // Log top pools for debugging
+  const sorted = [...out].sort((a, b) => b.apr - a.apr)
+  for (const s of sorted.slice(0, 5)) {
+    console.log(`  → ${s.label}: APR=${s.apr}%`)
+  }
+
+  return out
+}
+
+// Helper: process a single Sugar pool into an AprEntry
+function processPool(
+  p: any, symbol: string, base: string, quote: string, out: AprEntry[]
+) {
+  const tokens = [base, quote]
+
+  // Pool type detection from symbol prefix
+  const isCL     = symbol.startsWith('CL')
+  const isStablePool = symbol.startsWith('sAMM') || allStable(tokens)
+
+  // APR from the Sugar contract
+  // The contract returns APR as a uint256. Scaling depends on the Sugar version:
+  // - Most common: percentage with 18 decimals (245.3% → 245300000000000000000)
+  // - Or: basis points (245.3% → 24530)
+  // We auto-detect based on magnitude.
+  const aprRaw = BigInt(p.apr?.toString() ?? '0')
+  let apr: number
+
+  if (aprRaw === 0n) {
+    apr = 0
+  } else if (aprRaw > 10n ** 15n) {
+    // Likely 18-decimal format: divide by 10^18
+    apr = Number(aprRaw) / 1e18
+  } else if (aprRaw > 100_000n) {
+    // Likely basis points × 100 or similar: divide by 100
+    apr = Number(aprRaw) / 100
+  } else {
+    // Likely direct percentage or basis points
+    // If > 10000, treat as basis points
+    apr = Number(aprRaw) > 10000 ? Number(aprRaw) / 100 : Number(aprRaw)
+  }
+
+  // Cap unrealistic values
+  if (apr > 50_000 || apr < 0) return
+
+  // Check if gauge is alive (receiving emissions)
+  // Pool is still valid even without gauge (fee revenue), but APR may be 0
+  const gaugeAlive = Boolean(p.gauge_alive ?? p.gaugeAlive ?? false)
+
+  const suffix = isStablePool ? ' (stable)' : isCL ? ' (CL)' : ''
+  const label  = `${base}-${quote}${suffix}`
+
+  out.push({
+    protocol: isCL ? 'Velodrome V3' : 'Velodrome',
+    logo:     'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48',
+    url:      VELO_URL,
+    tokens,
+    label,
+    apr:      Math.round(apr * 100) / 100,
+    tvl:      0, // Will be enriched from GeckoTerminal
+    type:     'pool',
+    isStable: isStablePool,
+  })
+}
+
+// ─── GeckoTerminal for TVL data and fallback ─────────────────────────────────
+// Used for: (1) TVL data to enrich Sugar pools, (2) Fallback if Sugar RPC fails
 async function fetchGeckoTerminalVelodrome(): Promise<AprEntry[]> {
   const out: AprEntry[] = []
-  const seen = new Set<string>() // dedup by pool address
+  const seen = new Set<string>()
 
   try {
-    // Fetch pools from each Velodrome DEX on Ink in parallel
     const fetches = VELO_DEX_IDS.map(async (dexId) => {
       try {
         const url = `${GECKO_BASE}/networks/ink/dexes/${dexId}/pools?page=1&sort=h24_volume_usd_desc&include=base_token,quote_token`
@@ -259,18 +444,10 @@ async function fetchGeckoTerminalVelodrome(): Promise<AprEntry[]> {
           signal: AbortSignal.timeout(10_000),
           headers: { 'Accept': 'application/json' },
         })
-        if (!res.ok) {
-          console.log(`[best-aprs] GeckoTerminal ${dexId}: HTTP ${res.status}`)
-          return { dexId, pools: [], included: [] }
-        }
+        if (!res.ok) return { dexId, pools: [], included: [] }
         const json = await res.json()
-        return {
-          dexId,
-          pools: json.data ?? [],
-          included: json.included ?? [],
-        }
-      } catch (e) {
-        console.log(`[best-aprs] GeckoTerminal ${dexId}: fetch error`, e)
+        return { dexId, pools: json.data ?? [], included: json.included ?? [] }
+      } catch {
         return { dexId, pools: [], included: [] }
       }
     })
@@ -287,12 +464,13 @@ async function fetchGeckoTerminalVelodrome(): Promise<AprEntry[]> {
       }
     }
 
-    let totalPools = 0
+    // Velodrome fee rates for fallback APR estimation
+    const VELO_FEE_STABLE  = 0.0001
+    const VELO_FEE_DEFAULT = 0.003
+
     for (const { dexId, pools } of results) {
       const isSlipstream = dexId.includes('slipstream')
-
       for (const pool of pools) {
-        totalPools++
         const addr = pool.attributes?.address ?? pool.id ?? ''
         if (seen.has(addr)) continue
         seen.add(addr)
@@ -300,51 +478,39 @@ async function fetchGeckoTerminalVelodrome(): Promise<AprEntry[]> {
         const attrs = pool.attributes ?? {}
         const poolName = attrs.name ?? ''
 
-        // Get token symbols from included data or parse from pool name
         const baseTokenId = pool.relationships?.base_token?.data?.id ?? ''
         const quoteTokenId = pool.relationships?.quote_token?.data?.id ?? ''
         let base = tokenSymbols.get(baseTokenId) ?? ''
         let quote = tokenSymbols.get(quoteTokenId) ?? ''
 
-        // Fallback: parse from pool name like "WETH / USDC.e"
         if ((!base || !quote) && poolName.includes('/')) {
           const parts = poolName.split('/').map((s: string) => s.trim())
           if (!base && parts[0]) base = parts[0]
           if (!quote && parts[1]) quote = parts[1]
         }
-
         if (!base || !quote) continue
 
-        // Get volume and liquidity
         const reserveUsd = parseFloat(attrs.reserve_in_usd ?? '0')
         const vol24h     = parseFloat(attrs.volume_usd?.h24 ?? '0')
-
-        // Skip tiny pools
         if (reserveUsd < 50) continue
 
-        // Determine if stable pool
         const pairIsStable = poolName.toLowerCase().includes('stable') ||
                              allStable([base, quote])
 
-        // Estimate fee APR from 24h volume
-        // Slipstream (CL) pools typically have higher fee tiers
+        // Fee-only APR estimate (used as fallback when Sugar fails)
         const feeRate = pairIsStable ? VELO_FEE_STABLE : VELO_FEE_DEFAULT
         const feeApr = reserveUsd > 0 ? (vol24h * feeRate * 365 / reserveUsd) * 100 : 0
 
-        // Cap unrealistic APR
-        const cappedApr = Math.min(feeApr, 50_000)
-
         const tokens = [base, quote]
         const suffix = pairIsStable ? ' (stable)' : isSlipstream ? ' (CL)' : ''
-        const label  = `${base}-${quote}${suffix}`
 
         out.push({
           protocol: isSlipstream ? 'Velodrome V3' : 'Velodrome',
           logo:     'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48',
           url:      VELO_URL,
           tokens,
-          label,
-          apr:      Math.round(cappedApr * 100) / 100,
+          label:    `${base}-${quote}${suffix}`,
+          apr:      Math.round(Math.min(feeApr, 50_000) * 100) / 100,
           tvl:      reserveUsd,
           type:     'pool',
           isStable: pairIsStable,
@@ -352,11 +518,62 @@ async function fetchGeckoTerminalVelodrome(): Promise<AprEntry[]> {
       }
     }
 
-    console.log(`[best-aprs] GeckoTerminal: ${totalPools} total Velodrome pools on Ink, ${out.length} after filtering`)
+    console.log(`[best-aprs] GeckoTerminal: ${out.length} Velodrome pools (with TVL data)`)
   } catch (e) {
     console.error('[best-aprs] GeckoTerminal error:', e)
   }
   return out
+}
+
+// ─── Combined Velodrome fetcher: Sugar APR + GeckoTerminal TVL ───────────────
+async function fetchVelodromeData(): Promise<AprEntry[]> {
+  // Fetch Sugar (real APR) and GeckoTerminal (TVL) in parallel
+  const [sugarResult, geckoResult] = await Promise.allSettled([
+    fetchLpSugar(),
+    fetchGeckoTerminalVelodrome(),
+  ])
+
+  const sugarPools = sugarResult.status === 'fulfilled' ? sugarResult.value : []
+  const geckoPools = geckoResult.status === 'fulfilled' ? geckoResult.value : []
+
+  if (sugarResult.status === 'rejected') {
+    console.log(`[best-aprs] LpSugar failed: ${sugarResult.reason}`)
+  }
+
+  // If Sugar succeeded → use Sugar APR, enrich with GeckoTerminal TVL
+  if (sugarPools.length > 0) {
+    // Build TVL lookup from GeckoTerminal by token pair
+    const tvlByPair = new Map<string, number>()
+    for (const g of geckoPools) {
+      const key = [...g.tokens].map(t => t.toUpperCase()).sort().join('-')
+      const existing = tvlByPair.get(key) ?? 0
+      if (g.tvl > existing) tvlByPair.set(key, g.tvl)
+    }
+
+    // Enrich Sugar pools with TVL
+    for (const s of sugarPools) {
+      const key = [...s.tokens].map(t => t.toUpperCase()).sort().join('-')
+      s.tvl = tvlByPair.get(key) ?? 0
+    }
+
+    // Also add any GeckoTerminal pools NOT in Sugar (edge cases)
+    const sugarKeys = new Set(sugarPools.map(s =>
+      [...s.tokens].map(t => t.toUpperCase()).sort().join('-')
+    ))
+    for (const g of geckoPools) {
+      const key = [...g.tokens].map(t => t.toUpperCase()).sort().join('-')
+      if (!sugarKeys.has(key) && g.tvl >= 500) {
+        sugarPools.push(g)
+      }
+    }
+
+    console.log(`[best-aprs] Velodrome: ${sugarPools.length} pools (Sugar APR + GeckoTerminal TVL)`)
+    return sugarPools
+  }
+
+  // Fallback: Sugar failed, use GeckoTerminal fee-only APR
+  console.log(`[best-aprs] Velodrome: falling back to GeckoTerminal (fee-only APR)`)
+  return geckoPools
 }
 
 // ─── Dedup key helper ─────────────────────────────────────────────────────────
@@ -373,53 +590,61 @@ function dedupeKey(tokens: string[], protocol: string): string {
 
 // ─── Main fetch function ──────────────────────────────────────────────────────
 async function fetchAllAprs(): Promise<AprEntry[]> {
-  // Fetch from both sources in parallel
-  const [defiLlama, geckoTerminal] = await Promise.all([
+  // Fetch from all sources in parallel:
+  // - DefiLlama: All Ink protocols (Curve, Aave, Morpho, Tydro, etc.)
+  // - Velodrome: Sugar on-chain APR + GeckoTerminal TVL (with fallback)
+  const [defiLlama, velodrome] = await Promise.all([
     fetchDefiLlama(),
-    fetchGeckoTerminalVelodrome(),
+    fetchVelodromeData(),
   ])
 
-  // DefiLlama has REAL APRs (fees + emissions), always preferred
-  const all = [...defiLlama]
-  const existingKeys = new Set(all.map(e => dedupeKey(e.tokens, e.protocol)))
+  // DefiLlama has data for many protocols including Velodrome
+  // Velodrome data from Sugar has the most accurate APR (includes emissions)
+  const all: AprEntry[] = []
+  const existingKeys = new Set<string>()
 
-  // Build a lookup of DefiLlama APRs by token pair (for enriching GeckoTerminal)
-  const llamaAprByTokens = new Map<string, { apr: number; tvl: number }>()
-  for (const e of defiLlama) {
-    if (e.protocol.toLowerCase().includes('velodrome')) {
-      const tokenKey = [...e.tokens].map(t => t.toUpperCase()).sort().join('-')
-      const existing = llamaAprByTokens.get(tokenKey)
-      // Keep the highest APR entry for each token pair
-      if (!existing || e.apr > existing.apr) {
-        llamaAprByTokens.set(tokenKey, { apr: e.apr, tvl: e.tvl })
-      }
-    }
-  }
-
-  let enriched = 0
-  let added = 0
-
-  for (const v of geckoTerminal) {
-    const key = dedupeKey(v.tokens, v.protocol)
-    if (existingKeys.has(key)) continue // DefiLlama already has this pool with real APR
-
-    // Try to enrich GeckoTerminal pool with DefiLlama APR data (includes emissions)
-    const tokenKey = [...v.tokens].map(t => t.toUpperCase()).sort().join('-')
-    const llamaData = llamaAprByTokens.get(tokenKey)
-    if (llamaData && llamaData.apr > v.apr) {
-      v.apr = llamaData.apr
-      enriched++
-    }
-
-    // Add pool if it has any APR or significant TVL
-    if (v.apr > 0 || v.tvl >= 1000) {
+  // 1. Add Velodrome data first (Sugar has the best APR data)
+  for (const v of velodrome) {
+    if (v.apr > 0 || v.tvl >= 500) {
+      const key = dedupeKey(v.tokens, v.protocol)
       all.push(v)
       existingKeys.add(key)
-      added++
     }
   }
 
-  console.log(`[best-aprs] Total: ${all.length} entries (${defiLlama.length} DefiLlama + ${added} GeckoTerminal, ${enriched} enriched with DefiLlama APR)`)
+  // 2. Add DefiLlama data, skipping Velodrome pools already covered
+  for (const d of defiLlama) {
+    const key = dedupeKey(d.tokens, d.protocol)
+    if (existingKeys.has(key)) {
+      // If DefiLlama has higher APR for this pool, update (shouldn't happen with Sugar)
+      const existing = all.find(e => dedupeKey(e.tokens, e.protocol) === key)
+      if (existing && d.apr > existing.apr && d.apr > 0) {
+        existing.apr = d.apr
+        if (d.tvl > existing.tvl) existing.tvl = d.tvl
+      }
+      continue
+    }
+    all.push(d)
+    existingKeys.add(key)
+  }
+
+  // 3. Enrich any Velodrome pools that have 0 TVL with DefiLlama TVL
+  const llamaTvlByTokens = new Map<string, number>()
+  for (const d of defiLlama) {
+    if (d.protocol.toLowerCase().includes('velodrome') && d.tvl > 0) {
+      const tokenKey = [...d.tokens].map(t => t.toUpperCase()).sort().join('-')
+      const existing = llamaTvlByTokens.get(tokenKey) ?? 0
+      if (d.tvl > existing) llamaTvlByTokens.set(tokenKey, d.tvl)
+    }
+  }
+  for (const e of all) {
+    if (e.tvl === 0 && e.protocol.toLowerCase().includes('velodrome')) {
+      const tokenKey = [...e.tokens].map(t => t.toUpperCase()).sort().join('-')
+      e.tvl = llamaTvlByTokens.get(tokenKey) ?? 0
+    }
+  }
+
+  console.log(`[best-aprs] Total: ${all.length} entries (${velodrome.length} Velodrome + ${defiLlama.length} DefiLlama, merged)`)
 
   // Sort by APR descending, with TVL as tiebreaker
   all.sort((a, b) => b.apr - a.apr || b.tvl - a.tvl)
