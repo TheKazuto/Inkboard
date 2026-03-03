@@ -56,6 +56,12 @@ const CSP = [
     "https://pagead2.googlesyndication.com",
     "https://adservice.google.com",
     "https://googleads.g.doubleclick.net",
+    "https://api.web3modal.org",
+    "https://api-core.curve.finance",
+    "https://inkyswap.com",
+    "https://yields.llama.fi",
+    "https://ink.drpc.org",
+    "https://icons.llamao.fi",
   ].join(' '),
 
   // Frames: AdSense only
