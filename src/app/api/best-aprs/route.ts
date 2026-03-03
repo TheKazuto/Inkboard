@@ -42,12 +42,14 @@ const PROTOCOL_META: Record<string, { name: string; logo: string; urlBase: strin
   'morpho':         { name: 'Morpho',       logo: 'https://icons.llamao.fi/icons/protocols/morpho?w=48&h=48',      urlBase: 'https://app.morpho.org' },
   'beefy':          { name: 'Beefy',        logo: 'https://icons.llamao.fi/icons/protocols/beefy?w=48&h=48',       urlBase: 'https://app.beefy.com' },
   'yearn-finance':  { name: 'Yearn',        logo: 'https://icons.llamao.fi/icons/protocols/yearn-finance?w=48&h=48', urlBase: 'https://yearn.fi/vaults' },
+  'tydro':          { name: 'Tydro',        logo: 'https://icons.llamao.fi/icons/protocols/tydro?w=48&h=48',          urlBase: 'https://app.tydro.com' },
 }
 
 function inferType(project: string, poolMeta: string | null): 'pool' | 'vault' | 'lend' {
   const p = project.toLowerCase(), m = (poolMeta ?? '').toLowerCase()
   if (p.includes('aave') || p.includes('compound') || p.includes('morpho') ||
       p.includes('silo') || p.includes('euler') || p.includes('fraxlend') ||
+      p.includes('tydro') ||
       m.includes('lend') || m.includes('supply') || m.includes('borrow')) return 'lend'
   if (p.includes('beefy') || p.includes('yearn') || p.includes('convex') ||
       p.includes('stakedao') || m.includes('vault') || m.includes('auto')) return 'vault'
