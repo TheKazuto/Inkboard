@@ -226,91 +226,135 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
   return out
 }
 
-// ─── DexScreener API for Velodrome on Ink ─────────────────────────────────────
-// DexScreener indexes Velodrome pools on Ink but does NOT provide APR data.
-// We use it ONLY for pool discovery (tokens, TVL). Real APRs (with VELO
-// emissions) come from DefiLlama when available. Pools without DefiLlama
-// APR data are shown with TVL info so users can check the real APR on
-// velodrome.finance directly.
-const INK_TOKENS = [
-  '0x4200000000000000000000000000000000000006', // WETH
-  '0xF1815bd50670a7d54d3B88daeddea88960E8e8a9', // USDC.e
-  '0x0200C29006150606B650577BBE7B6248F58470c1', // USDT0
-]
+// ─── GeckoTerminal API for Velodrome on Ink ──────────────────────────────────
+// GeckoTerminal (by CoinGecko) indexes Velodrome pools on Ink with dedicated
+// DEX endpoints. We estimate fee APR from 24h volume and liquidity.
+// Note: this is FEE APR only and does not include VELO gauge emissions.
+// Real APR on velodrome.finance may be higher.
+// If DefiLlama has data (which includes emissions), it takes priority.
 
 const VELO_URL = 'https://velodrome.finance/liquidity?chain=57073'
+const GECKO_BASE = 'https://api.geckoterminal.com/api/v2'
 
-async function fetchDexScreenerVelodrome(): Promise<AprEntry[]> {
+// GeckoTerminal DEX IDs for Velodrome on Ink
+const VELO_DEX_IDS = [
+  'velodrome-finance-v2-ink',   // V2 AMM pools (stable + volatile)
+  'velodrome-slipstream-ink',   // V3 Slipstream (concentrated liquidity)
+]
+
+// Velodrome fee rates by pool type
+const VELO_FEE_STABLE  = 0.0001  // 0.01% for stable pools
+const VELO_FEE_DEFAULT = 0.003   // 0.3% for volatile/CL pools
+
+async function fetchGeckoTerminalVelodrome(): Promise<AprEntry[]> {
   const out: AprEntry[] = []
-  const seen = new Set<string>() // dedup by pairAddress
+  const seen = new Set<string>() // dedup by pool address
 
   try {
-    // Fetch pairs for each known Ink token in parallel
-    const fetches = INK_TOKENS.map(async (tokenAddr) => {
+    // Fetch pools from each Velodrome DEX on Ink in parallel
+    const fetches = VELO_DEX_IDS.map(async (dexId) => {
       try {
-        const res = await fetch(
-          `https://api.dexscreener.com/token-pairs/v1/ink/${tokenAddr}`,
-          { signal: AbortSignal.timeout(10_000) }
-        )
-        if (!res.ok) return []
-        const pairs: any[] = await res.json()
-        return Array.isArray(pairs) ? pairs : []
-      } catch {
-        return []
+        const url = `${GECKO_BASE}/networks/ink/dexes/${dexId}/pools?page=1&sort=h24_volume_usd_desc&include=base_token,quote_token`
+        const res = await fetch(url, {
+          signal: AbortSignal.timeout(10_000),
+          headers: { 'Accept': 'application/json' },
+        })
+        if (!res.ok) {
+          console.log(`[best-aprs] GeckoTerminal ${dexId}: HTTP ${res.status}`)
+          return { dexId, pools: [], included: [] }
+        }
+        const json = await res.json()
+        return {
+          dexId,
+          pools: json.data ?? [],
+          included: json.included ?? [],
+        }
+      } catch (e) {
+        console.log(`[best-aprs] GeckoTerminal ${dexId}: fetch error`, e)
+        return { dexId, pools: [], included: [] }
       }
     })
 
     const results = await Promise.all(fetches)
-    const allPairs = results.flat()
 
-    console.log(`[best-aprs] DexScreener: ${allPairs.length} total Ink pairs found`)
-
-    for (const p of allPairs) {
-      // Only Velodrome pairs
-      const dexId = (p.dexId ?? '').toLowerCase()
-      if (!dexId.includes('velodrome')) continue
-
-      const pairAddr = p.pairAddress ?? ''
-      if (seen.has(pairAddr)) continue
-      seen.add(pairAddr)
-
-      const base  = p.baseToken?.symbol ?? ''
-      const quote = p.quoteToken?.symbol ?? ''
-      if (!base || !quote) continue
-
-      const liqUsd = p.liquidity?.usd ?? 0
-
-      // Skip tiny pools
-      if (liqUsd < 50) continue
-
-      // Determine if stable pool
-      const labels = (p.labels ?? []).map((l: string) => l.toLowerCase())
-      const pairIsStable = labels.includes('stable') || allStable([base, quote])
-
-      const tokens = [base, quote]
-      const label  = `${base}-${quote}${pairIsStable ? ' (stable)' : ''}`
-
-      // NOTE: We do NOT estimate APR from DexScreener data.
-      // DexScreener only has volume/liquidity, not VELO gauge emissions
-      // which make up 90%+ of the real APR on Velodrome.
-      // APR will be filled from DefiLlama in the merge step if available,
-      // otherwise it stays 0 (user should check velodrome.finance).
-      out.push({
-        protocol: 'Velodrome',
-        logo:     'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48',
-        url:      VELO_URL,
-        tokens,
-        label,
-        apr:      0,
-        tvl:      liqUsd,
-        type:     'pool',
-        isStable: pairIsStable,
-      })
+    // Build token lookup from included resources
+    const tokenSymbols = new Map<string, string>()
+    for (const { included } of results) {
+      for (const inc of included) {
+        if (inc.type === 'token' && inc.attributes?.symbol) {
+          tokenSymbols.set(inc.id, inc.attributes.symbol)
+        }
+      }
     }
 
-    console.log(`[best-aprs] DexScreener: ${out.length} Velodrome pools on Ink after filtering`)
+    let totalPools = 0
+    for (const { dexId, pools } of results) {
+      const isSlipstream = dexId.includes('slipstream')
+
+      for (const pool of pools) {
+        totalPools++
+        const addr = pool.attributes?.address ?? pool.id ?? ''
+        if (seen.has(addr)) continue
+        seen.add(addr)
+
+        const attrs = pool.attributes ?? {}
+        const poolName = attrs.name ?? ''
+
+        // Get token symbols from included data or parse from pool name
+        const baseTokenId = pool.relationships?.base_token?.data?.id ?? ''
+        const quoteTokenId = pool.relationships?.quote_token?.data?.id ?? ''
+        let base = tokenSymbols.get(baseTokenId) ?? ''
+        let quote = tokenSymbols.get(quoteTokenId) ?? ''
+
+        // Fallback: parse from pool name like "WETH / USDC.e"
+        if ((!base || !quote) && poolName.includes('/')) {
+          const parts = poolName.split('/').map((s: string) => s.trim())
+          if (!base && parts[0]) base = parts[0]
+          if (!quote && parts[1]) quote = parts[1]
+        }
+
+        if (!base || !quote) continue
+
+        // Get volume and liquidity
+        const reserveUsd = parseFloat(attrs.reserve_in_usd ?? '0')
+        const vol24h     = parseFloat(attrs.volume_usd?.h24 ?? '0')
+
+        // Skip tiny pools
+        if (reserveUsd < 50) continue
+
+        // Determine if stable pool
+        const pairIsStable = poolName.toLowerCase().includes('stable') ||
+                             allStable([base, quote])
+
+        // Estimate fee APR from 24h volume
+        // Slipstream (CL) pools typically have higher fee tiers
+        const feeRate = pairIsStable ? VELO_FEE_STABLE : VELO_FEE_DEFAULT
+        const feeApr = reserveUsd > 0 ? (vol24h * feeRate * 365 / reserveUsd) * 100 : 0
+
+        // Cap unrealistic APR
+        const cappedApr = Math.min(feeApr, 50_000)
+
+        const tokens = [base, quote]
+        const suffix = pairIsStable ? ' (stable)' : isSlipstream ? ' (CL)' : ''
+        const label  = `${base}-${quote}${suffix}`
+
+        out.push({
+          protocol: isSlipstream ? 'Velodrome V3' : 'Velodrome',
+          logo:     'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48',
+          url:      VELO_URL,
+          tokens,
+          label,
+          apr:      Math.round(cappedApr * 100) / 100,
+          tvl:      reserveUsd,
+          type:     'pool',
+          isStable: pairIsStable,
+        })
+      }
+    }
+
+    console.log(`[best-aprs] GeckoTerminal: ${totalPools} total Velodrome pools on Ink, ${out.length} after filtering`)
   } catch (e) {
-    console.error('[best-aprs] DexScreener error:', e)
+    console.error('[best-aprs] GeckoTerminal error:', e)
   }
   return out
 }
@@ -330,16 +374,16 @@ function dedupeKey(tokens: string[], protocol: string): string {
 // ─── Main fetch function ──────────────────────────────────────────────────────
 async function fetchAllAprs(): Promise<AprEntry[]> {
   // Fetch from both sources in parallel
-  const [defiLlama, dexScreener] = await Promise.all([
+  const [defiLlama, geckoTerminal] = await Promise.all([
     fetchDefiLlama(),
-    fetchDexScreenerVelodrome(),
+    fetchGeckoTerminalVelodrome(),
   ])
 
   // DefiLlama has REAL APRs (fees + emissions), always preferred
   const all = [...defiLlama]
   const existingKeys = new Set(all.map(e => dedupeKey(e.tokens, e.protocol)))
 
-  // Build a lookup of DefiLlama APRs by token pair (for enriching DexScreener)
+  // Build a lookup of DefiLlama APRs by token pair (for enriching GeckoTerminal)
   const llamaAprByTokens = new Map<string, { apr: number; tvl: number }>()
   for (const e of defiLlama) {
     if (e.protocol.toLowerCase().includes('velodrome')) {
@@ -355,20 +399,19 @@ async function fetchAllAprs(): Promise<AprEntry[]> {
   let enriched = 0
   let added = 0
 
-  for (const v of dexScreener) {
+  for (const v of geckoTerminal) {
     const key = dedupeKey(v.tokens, v.protocol)
-    if (existingKeys.has(key)) continue // DefiLlama already has this pool
+    if (existingKeys.has(key)) continue // DefiLlama already has this pool with real APR
 
-    // Try to enrich DexScreener pool with DefiLlama APR data
+    // Try to enrich GeckoTerminal pool with DefiLlama APR data (includes emissions)
     const tokenKey = [...v.tokens].map(t => t.toUpperCase()).sort().join('-')
     const llamaData = llamaAprByTokens.get(tokenKey)
-    if (llamaData && llamaData.apr > 0) {
+    if (llamaData && llamaData.apr > v.apr) {
       v.apr = llamaData.apr
       enriched++
     }
 
-    // Only add pools that have APR data (from DefiLlama enrichment)
-    // or that have significant TVL (> $1000) even without APR
+    // Add pool if it has any APR or significant TVL
     if (v.apr > 0 || v.tvl >= 1000) {
       all.push(v)
       existingKeys.add(key)
@@ -376,7 +419,7 @@ async function fetchAllAprs(): Promise<AprEntry[]> {
     }
   }
 
-  console.log(`[best-aprs] Total: ${all.length} entries (${defiLlama.length} DefiLlama + ${added} DexScreener, ${enriched} enriched with DefiLlama APR)`)
+  console.log(`[best-aprs] Total: ${all.length} entries (${defiLlama.length} DefiLlama + ${added} GeckoTerminal, ${enriched} enriched with DefiLlama APR)`)
 
   // Sort by APR descending, with TVL as tiebreaker
   all.sort((a, b) => b.apr - a.apr || b.tvl - a.tvl)
