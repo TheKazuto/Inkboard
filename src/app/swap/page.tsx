@@ -3,21 +3,17 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import {
   ArrowLeftRight, ChevronDown, RefreshCw, Info,
-  CheckCircle, XCircle, Loader, ExternalLink, Search, X
+  CheckCircle, XCircle, Loader, ExternalLink, Search, X,
+  Settings, AlertTriangle
 } from 'lucide-react'
 import { useWallet } from '@/contexts/WalletContext'
-import { useSendTransaction, useChainId, useSwitchChain } from 'wagmi'
+import { useSendTransaction, useWaitForTransactionReceipt, useChainId, useSwitchChain } from 'wagmi'
 import { encodeFunctionData } from 'viem'
 import { SORA } from '@/lib/styles'
 
 // ─── LI.FI INTEGRATOR CONFIG ────────────────────────────────────────────────
-// Register at https://docs.li.fi/monetization-take-fees to start collecting fees
-// Set NEXT_PUBLIC_LIFI_INTEGRATOR in .env.local (e.g. "inkboard")
-// Set NEXT_PUBLIC_LIFI_FEE as decimal (e.g. "0.002" = 0.2%)
-// All LI.FI API calls go through server-side proxies (/api/lifi-*)
-// to avoid CORS and ad-blocker issues in the browser.
 const INTEGRATOR     = process.env.NEXT_PUBLIC_LIFI_INTEGRATOR ?? 'inkboard'
-const INTEGRATOR_FEE = parseFloat(process.env.NEXT_PUBLIC_LIFI_FEE ?? '0.002')  // 0.2% integrator fee
+const INTEGRATOR_FEE = parseFloat(process.env.NEXT_PUBLIC_LIFI_FEE ?? '0.002')
 const NATIVE         = '0x0000000000000000000000000000000000000000'
 
 // ─── TYPES ──────────────────────────────────────────────────────────────────
@@ -89,30 +85,16 @@ interface LifiQuote {
   }[]
 }
 
-// ─── SLIPPAGE DEFAULTS ──────────────────────────────────────────────────────
-const SLIPPAGE_ON_CHAIN = 0.01
-const SLIPPAGE_CROSS    = 0.02
+// ─── SLIPPAGE PRESETS (FIX #7) ───────────────────────────────────────────────
+const SLIPPAGE_PRESETS = [0.005, 0.01, 0.02, 0.03]
+const SLIPPAGE_CROSS_DEFAULT = 0.02
+const SLIPPAGE_ONCHAIN_DEFAULT = 0.01
 
 // ─── GAS BUFFER for MAX button ──────────────────────────────────────────────
-// Conservative estimate of gas cost for a swap, in native token units.
-// L2s have very cheap gas — buffer should be minimal.
 const GAS_BUFFER: Record<number, number> = {
-  1: 0.003,       // ETH mainnet — expensive
-  56: 0.003,      // BSC
-  137: 0.5,       // Polygon POL
-  43114: 0.01,    // Avalanche
-  250: 1.0,       // Fantom
-  100: 0.1,       // Gnosis
-  5000: 0.5,      // Mantle
-  // L2s — very cheap gas, minimal buffer
-  10: 0.0001,     // Optimism
-  8453: 0.0001,   // Base
-  42161: 0.0001,  // Arbitrum
-  57073: 0.0001,  // Ink
-  324: 0.0001,    // zkSync
-  59144: 0.0001,  // Linea
-  534352: 0.0001, // Scroll
-  81457: 0.0001,  // Blast
+  1: 0.003, 56: 0.003, 137: 0.5, 43114: 0.01, 250: 1.0, 100: 0.1, 5000: 0.5,
+  10: 0.0001, 8453: 0.0001, 42161: 0.0001, 57073: 0.0001,
+  324: 0.0001, 59144: 0.0001, 534352: 0.0001, 81457: 0.0001,
 }
 
 // ─── WELL-KNOWN LOGO OVERRIDES ──────────────────────────────────────────────
@@ -177,19 +159,35 @@ function ChainImage({ chain, size = 28 }: { chain: LifiChain; size?: number }) {
   return <FallbackImage key={String(chain.id)} urls={urls} symbol={chain.name} size={size} />
 }
 
+// ─── FIX #1: Precise human→wei conversion using string math ─────────────────
+// Avoids parseFloat precision loss for tokens with 18 decimals
+function humanToWei(humanAmount: string, decimals: number): bigint {
+  if (!humanAmount || humanAmount === '0') return 0n
+  const trimmed = humanAmount.trim()
+  const parts = trimmed.split('.')
+  const intPart = parts[0] || '0'
+  let fracPart = parts[1] || ''
+
+  // Pad or truncate fractional part to exactly `decimals` digits
+  if (fracPart.length > decimals) {
+    fracPart = fracPart.slice(0, decimals)
+  } else {
+    fracPart = fracPart.padEnd(decimals, '0')
+  }
+
+  const combined = intPart + fracPart
+  // Remove leading zeros but keep at least '0'
+  const cleaned = combined.replace(/^0+/, '') || '0'
+  return BigInt(cleaned)
+}
+
 // ─── LI.FI API HELPERS (via server-side proxies) ────────────────────────────
-// FIX #1 & #2: Use internal API routes as proxies instead of calling li.quest
-// directly from the browser. This avoids CORS / ad-blocker / CSP issues.
-
 let cachedChains: LifiChain[] | null = null
-
-// Also cache RPC URLs extracted from chain metadata for balance fetching
 const chainRpcCache: Record<number, string> = {}
 
 async function loadChains(): Promise<LifiChain[]> {
   if (cachedChains) return cachedChains
   try {
-    // Fetch via our own Next.js API proxy (server-side, no CORS)
     const res = await fetch('/api/lifi-chains')
     if (!res.ok) throw new Error(`${res.status}`)
     const data: { chains: LifiChain[] } = await res.json()
@@ -204,15 +202,11 @@ async function loadChains(): Promise<LifiChain[]> {
         if (bi !== -1) return 1
         return a.name.localeCompare(b.name)
       })
-    // Extract RPC URLs from chain metadata for dynamic balance fetching
     for (const c of cachedChains) {
-      if (c.metamask?.rpcUrls?.[0]) {
-        chainRpcCache[c.id] = c.metamask.rpcUrls[0]
-      }
+      if (c.metamask?.rpcUrls?.[0]) chainRpcCache[c.id] = c.metamask.rpcUrls[0]
     }
     return cachedChains
   } catch {
-    // Do NOT cache fallback — next mount can retry
     return [
       { id: 57073, key: 'ink', name: 'Ink', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH }, metamask: { blockExplorerUrls: ['https://explorer.inkonchain.com/'], rpcUrls: ['https://rpc-gel.inkonchain.com'], chainName: 'Ink' } },
       { id: 1, key: 'eth', name: 'Ethereum', chainType: 'EVM', coin: 'ETH', logoURI: '', nativeToken: { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, logoURI: OVERRIDE_LOGOS.ETH }, metamask: { blockExplorerUrls: ['https://etherscan.io/'], rpcUrls: ['https://ethereum-rpc.publicnode.com'], chainName: 'Ethereum' } },
@@ -235,7 +229,6 @@ async function loadTokensForChain(chainId: number): Promise<LifiToken[]> {
   const cached = tokenListCache[chainId]
   if (cached && Date.now() - cached.ts < TOKEN_CACHE_TTL) return cached.tokens
   try {
-    // FIX #1: Fetch via our own Next.js API proxy (server-side, no CORS)
     const res = await fetch(`/api/lifi-tokens?chain=${chainId}`)
     if (!res.ok) throw new Error(`${res.status}`)
     const data: { tokens: Record<string, LifiToken[]> } = await res.json()
@@ -247,7 +240,6 @@ async function loadTokensForChain(chainId: number): Promise<LifiToken[]> {
     tokenListCache[chainId] = { tokens: result, ts: Date.now() }
     return result
   } catch {
-    // Do NOT cache empty results on error — next open can retry
     return []
   }
 }
@@ -255,14 +247,12 @@ async function loadTokensForChain(chainId: number): Promise<LifiToken[]> {
 async function fetchQuote(
   fromChain: LifiChain, fromToken: LifiToken, fromAmountHuman: string,
   toChain: LifiChain, toToken: LifiToken,
-  fromAddress: string, toAddress?: string,
+  fromAddress: string, slippage: number, toAddress?: string,
 ): Promise<LifiQuote> {
   const decimals = fromToken.decimals ?? 18
-  const parsed = parseFloat(fromAmountHuman)
-  if (isNaN(parsed) || parsed <= 0) throw new Error('Invalid amount')
-  const fromAmount = BigInt(Math.floor(parsed * Math.pow(10, decimals))).toString()
-  const isCross = fromChain.id !== toChain.id
-  const slippage = isCross ? SLIPPAGE_CROSS : SLIPPAGE_ON_CHAIN
+  // FIX #1: Use precise BigInt conversion instead of parseFloat
+  const fromAmount = humanToWei(fromAmountHuman, decimals).toString()
+  if (fromAmount === '0') throw new Error('Invalid amount')
 
   const params = new URLSearchParams({
     fromChain: String(fromChain.id), toChain: String(toChain.id),
@@ -272,7 +262,6 @@ async function fetchQuote(
   if (INTEGRATOR_FEE > 0) params.set('fee', String(INTEGRATOR_FEE))
   if (toAddress && toAddress !== fromAddress) params.set('toAddress', toAddress)
 
-  // Use server-side proxy to avoid CORS / ad-blocker issues
   const res = await fetch(`/api/lifi-quote?${params}`)
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
@@ -285,7 +274,6 @@ async function fetchStatus(tool: string, fromChainId: number, toChainId: number,
   const params = new URLSearchParams({
     bridge: tool, fromChain: String(fromChainId), toChain: String(toChainId), txHash,
   })
-  // Use server-side proxy to avoid CORS / ad-blocker issues
   const res = await fetch(`/api/lifi-status?${params}`)
   if (!res.ok) throw new Error(`${res.status}`)
   return res.json() as Promise<{
@@ -295,8 +283,6 @@ async function fetchStatus(tool: string, fromChainId: number, toChainId: number,
   }>
 }
 
-// FIX #3: Use dynamic RPC from LI.FI chain metadata instead of hardcoded list.
-// Fallback to well-known public RPCs if chain metadata isn't loaded yet.
 const FALLBACK_RPC: Record<number, string> = {
   1: 'https://ethereum-rpc.publicnode.com', 56: 'https://bsc-rpc.publicnode.com',
   137: 'https://polygon-rpc.com', 42161: 'https://arb1.arbitrum.io/rpc',
@@ -308,7 +294,6 @@ const FALLBACK_RPC: Record<number, string> = {
 }
 
 function getRpcUrl(chain: LifiChain): string | null {
-  // Priority: chain metadata from LI.FI → cached from loadChains → hardcoded fallback
   return chain.metamask?.rpcUrls?.[0] ?? chainRpcCache[chain.id] ?? FALLBACK_RPC[chain.id] ?? null
 }
 
@@ -318,8 +303,9 @@ const ERC20_APPROVE_ABI = [{
   outputs: [{ name: '', type: 'bool' }],
 }] as const
 
-type TxStatus = 'idle' | 'approving' | 'swapping' | 'pending' | 'success' | 'error'
+type TxStatus = 'idle' | 'approving' | 'waitingApproval' | 'swapping' | 'pending' | 'success' | 'error'
 const QUOTE_EXPIRY = 60
+const QUOTE_AUTO_REFRESH = 55 // FIX #8: auto-refresh 5s before expiry
 
 // Default tokens
 const INK_NATIVE: LifiToken = { address: NATIVE, symbol: 'ETH', name: 'Ether', decimals: 18, chainId: 57073, logoURI: OVERRIDE_LOGOS.ETH }
@@ -331,6 +317,80 @@ const INK_CHAIN: LifiChain = {
   id: 57073, key: 'ink', name: 'Ink', chainType: 'EVM', coin: 'ETH', logoURI: '',
   nativeToken: INK_NATIVE,
   metamask: { blockExplorerUrls: ['https://explorer.inkonchain.com/'], rpcUrls: ['https://rpc-gel.inkonchain.com'], chainName: 'Ink' },
+}
+
+// ─── FIX #7: SLIPPAGE SETTINGS MODAL ────────────────────────────────────────
+function SlippageModal({ value, onChange, onClose }: {
+  value: number; onChange: (v: number) => void; onClose: () => void
+}) {
+  const [custom, setCustom] = useState('')
+  const [showCustom, setShowCustom] = useState(!SLIPPAGE_PRESETS.includes(value))
+
+  useEffect(() => {
+    if (!SLIPPAGE_PRESETS.includes(value)) {
+      setCustom(String(value * 100))
+      setShowCustom(true)
+    }
+  }, [value])
+
+  function applyCustom() {
+    const n = parseFloat(custom)
+    if (!isNaN(n) && n > 0 && n <= 50) {
+      onChange(n / 100)
+      onClose()
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xs overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 pt-5 pb-3">
+          <h3 className="font-semibold text-gray-800" style={SORA}>Slippage Tolerance</h3>
+          <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-100 text-gray-400"><X size={18} /></button>
+        </div>
+        <div className="px-5 pb-5 space-y-3">
+          <div className="grid grid-cols-4 gap-2">
+            {SLIPPAGE_PRESETS.map(p => (
+              <button key={p} onClick={() => { onChange(p); onClose() }}
+                className={`py-2 rounded-xl text-sm font-semibold transition-colors ${
+                  value === p && !showCustom
+                    ? 'bg-violet-600 text-white shadow-md shadow-violet-200'
+                    : 'bg-gray-100 text-gray-600 hover:bg-violet-50 hover:text-violet-600'
+                }`}>
+                {p * 100}%
+              </button>
+            ))}
+          </div>
+          <div>
+            <button onClick={() => setShowCustom(!showCustom)}
+              className="text-xs text-violet-500 hover:text-violet-700 font-medium">
+              {showCustom ? 'Hide custom' : 'Custom value'}
+            </button>
+            {showCustom && (
+              <div className="flex items-center gap-2 mt-2">
+                <input type="number" min="0.01" max="50" step="0.1" value={custom}
+                  onChange={e => setCustom(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && applyCustom()}
+                  placeholder="e.g. 1.5"
+                  className="flex-1 px-3 py-2 rounded-xl bg-gray-50 border border-gray-200 text-sm outline-none focus:border-violet-300" />
+                <span className="text-sm text-gray-400 font-medium">%</span>
+                <button onClick={applyCustom}
+                  className="px-3 py-2 rounded-xl bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 transition-colors">
+                  Set
+                </button>
+              </div>
+            )}
+          </div>
+          {value >= 0.05 && (
+            <div className="flex items-center gap-1.5 text-xs text-amber-600 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+              <AlertTriangle size={12} />
+              High slippage may result in an unfavorable rate
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 // ─── CHAIN SELECTOR MODAL ───────────────────────────────────────────────────
@@ -462,9 +522,19 @@ export default function SwapPage() {
   const [txHash, setTxHash]     = useState<string | null>(null)
   const [txError, setTxError]   = useState<string | null>(null)
 
-  const [modal, setModal]                 = useState<'fromToken' | 'toToken' | 'fromChain' | 'toChain' | null>(null)
+  // FIX #2: Track approval hash for waitForTransactionReceipt
+  const [approvalHash, setApprovalHash] = useState<`0x${string}` | undefined>(undefined)
+
+  const [modal, setModal]                 = useState<'fromToken' | 'toToken' | 'fromChain' | 'toChain' | 'slippage' | null>(null)
   const [quoteAge, setQuoteAge]           = useState(0)
   const [receiverError, setReceiverError] = useState<string | null>(null)
+
+  // FIX #7: User-configurable slippage
+  const isCrossChain = fromChain.id !== toChain.id
+  const [slippageOnChain, setSlippageOnChain] = useState(SLIPPAGE_ONCHAIN_DEFAULT)
+  const [slippageCross, setSlippageCross]     = useState(SLIPPAGE_CROSS_DEFAULT)
+  const activeSlippage = isCrossChain ? slippageCross : slippageOnChain
+  const setActiveSlippage = isCrossChain ? setSlippageCross : setSlippageOnChain
 
   const validateReceiver = useCallback((val: string): boolean => {
     if (!val.trim()) return true
@@ -476,17 +546,17 @@ export default function SwapPage() {
   const quoteAgeRef    = useRef<ReturnType<typeof setInterval> | null>(null)
   const pollCleanupRef = useRef<(() => void) | null>(null)
 
-  // ── FIX #3: Balance via RPC — uses dynamic RPC from chain metadata ────────
-  // Store raw balance as BigInt string to avoid Number precision loss
-  // (ETH wei values easily exceed Number.MAX_SAFE_INTEGER)
-  const [fromBalanceRaw, setFromBalanceRaw] = useState<string | null>(null)  // wei string
+  // ── Balance via RPC ───────────────────────────────────────────────────────
+  const [fromBalanceRaw, setFromBalanceRaw] = useState<string | null>(null)
+  const [balanceError, setBalanceError]     = useState(false) // FIX #10
   const fromDecimals = fromToken.decimals ?? 18
 
   useEffect(() => {
     setFromBalanceRaw(null)
+    setBalanceError(false)
     if (!address || !isConnected) return
     const rpc = getRpcUrl(fromChain)
-    if (!rpc) return
+    if (!rpc) { setBalanceError(true); return }
     const controller = new AbortController()
     const isNative = fromToken.address === NATIVE
 
@@ -515,20 +585,19 @@ export default function SwapPage() {
           raw = BigInt(d.result && d.result !== '0x' ? d.result : '0x0')
         }
         setFromBalanceRaw(raw.toString())
-      } catch { /* aborted or RPC error */ }
+      } catch {
+        if (!controller.signal.aborted) setBalanceError(true)
+      }
     }
     fetchBal()
     return () => controller.abort()
   }, [address, isConnected, fromChain, fromToken.address, fromToken.decimals])
 
-  // Convert BigInt wei string → human-readable string with full precision
-  // Caps fractional digits to maxFrac (default 8) for clean display
   function weiToHuman(weiStr: string, decimals: number, maxFrac = 8): string {
     if (weiStr === '0') return '0'
     const padded = weiStr.padStart(decimals + 1, '0')
     const intPart = padded.slice(0, padded.length - decimals) || '0'
     const fracPart = padded.slice(padded.length - decimals)
-    // Cap to maxFrac digits, then trim trailing zeros
     const capped = fracPart.slice(0, maxFrac)
     const trimmed = capped.replace(/0+$/, '')
     return trimmed ? `${intPart}.${trimmed}` : intPart
@@ -544,18 +613,32 @@ export default function SwapPage() {
     return num.toLocaleString('en-US', { maximumFractionDigits: 6 })
   }, [fromBalanceHuman])
 
+  // FIX #3: Check if amount exceeds balance
+  const insufficientBalance = useMemo(() => {
+    if (!amount || !fromBalanceRaw || fromBalanceRaw === '0') return false
+    try {
+      const amountWei = humanToWei(amount, fromDecimals)
+      const balanceWei = BigInt(fromBalanceRaw)
+      return amountWei > balanceWei
+    } catch { return false }
+  }, [amount, fromBalanceRaw, fromDecimals])
+
+  // FIX #4: Check if same token on same chain
+  const isSameToken = useMemo(() => {
+    return fromChain.id === toChain.id &&
+      fromToken.address.toLowerCase() === toToken.address.toLowerCase()
+  }, [fromChain.id, toChain.id, fromToken.address, toToken.address])
+
   function handleMax() {
     if (fromBalanceRaw === null || fromBalanceRaw === '0') return
     const isNative = fromToken.address === NATIVE
     const bufferHuman = isNative ? (GAS_BUFFER[fromChain.id] ?? 0.002) : 0
 
     if (bufferHuman === 0) {
-      // ERC-20: use exact full balance (no buffer needed)
       setAmount(fromBalanceHuman!)
       return
     }
 
-    // Native token: subtract gas buffer using BigInt math for precision
     const bufferWei = BigInt(Math.floor(bufferHuman * Math.pow(10, fromDecimals)))
     const rawBig = BigInt(fromBalanceRaw)
     const maxWei = rawBig > bufferWei ? rawBig - bufferWei : 0n
@@ -566,6 +649,11 @@ export default function SwapPage() {
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { sendTransactionAsync } = useSendTransaction()
+
+  // FIX #2: Wait for approval receipt
+  const { isSuccess: approvalConfirmed } = useWaitForTransactionReceipt({
+    hash: approvalHash,
+  })
 
   useEffect(() => { loadChains().then(setChains) }, [])
   useEffect(() => { return () => { pollCleanupRef.current?.() } }, [])
@@ -584,19 +672,38 @@ export default function SwapPage() {
 
   const quoteExpired = quoteAge >= QUOTE_EXPIRY
 
+  // FIX #8: Auto-refresh quote before expiry
+  const autoRefreshRef = useRef(false)
+  useEffect(() => {
+    if (quoteAge === QUOTE_AUTO_REFRESH && quote && txStatus === 'idle' && amount && !autoRefreshRef.current) {
+      autoRefreshRef.current = true
+      getQuote(amount)
+    }
+    if (quoteAge < QUOTE_AUTO_REFRESH) {
+      autoRefreshRef.current = false
+    }
+  }, [quoteAge]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Quote with debounce
   const getQuote = useCallback(async (amt: string) => {
     if (!amt || isNaN(Number(amt)) || Number(amt) <= 0 || !address) { setQuote(null); return }
+    // FIX #4: Don't fetch quote for same token on same chain
+    if (fromChain.id === toChain.id &&
+        fromToken.address.toLowerCase() === toToken.address.toLowerCase()) {
+      setQuoteError('Select a different token')
+      setQuote(null)
+      return
+    }
     setQuoteLoading(true); setQuoteError(null)
     try {
       const recv = receiver.trim() || undefined
-      setQuote(await fetchQuote(fromChain, fromToken, amt, toChain, toToken, address, recv))
+      setQuote(await fetchQuote(fromChain, fromToken, amt, toChain, toToken, address, activeSlippage, recv))
     } catch (e: any) {
       setQuoteError(e.message?.includes('No available') || e.message?.includes('not found')
         ? 'No route found for this pair' : (e.message ?? 'No route found'))
       setQuote(null)
     } finally { setQuoteLoading(false) }
-  }, [fromChain, fromToken, toChain, toToken, address, receiver])
+  }, [fromChain, fromToken, toChain, toToken, address, receiver, activeSlippage])
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -610,33 +717,65 @@ export default function SwapPage() {
     setAmount(''); setQuote(null)
   }
 
-  function parseApprovalAmount(amt: string, decimals: number): bigint {
-    try {
-      const parsed = parseFloat(amt)
-      if (isNaN(parsed) || parsed <= 0) return 0n
-      return BigInt(Math.floor(parsed * 1.005 * Math.pow(10, decimals)))
-    } catch { return 0n }
-  }
-
   // ── Execute Swap ──────────────────────────────────────────────────────────
   async function executeSwap() {
     if (!address || !quote || !amount || quoteExpired || !quote.transactionRequest) return
+    if (insufficientBalance) return // FIX #3
+    if (isSameToken) return         // FIX #4
     if (receiver.trim() && !validateReceiver(receiver)) return
-    setTxStatus('idle'); setTxError(null)
+    setTxStatus('idle'); setTxError(null); setApprovalHash(undefined)
 
     try {
       const txReq = quote.transactionRequest
 
-      // Approval if needed
+      // FIX #1: Use precise BigInt for approval amount
+      // FIX #2: Wait for approval confirmation before swap
       if (quote.estimate.approvalAddress && fromToken.address !== NATIVE) {
         setTxStatus('approving')
-        await sendTransactionAsync({
+        const approveAmount = humanToWei(amount, fromToken.decimals)
+        // Add 0.5% buffer to approval to cover rounding
+        const approveWithBuffer = approveAmount + (approveAmount / 200n)
+        const appHash = await sendTransactionAsync({
           to: fromToken.address as `0x${string}`,
           data: encodeFunctionData({
             abi: ERC20_APPROVE_ABI, functionName: 'approve',
-            args: [quote.estimate.approvalAddress as `0x${string}`, parseApprovalAmount(amount, fromToken.decimals)],
+            args: [quote.estimate.approvalAddress as `0x${string}`, approveWithBuffer],
           }),
         })
+        setApprovalHash(appHash)
+        setTxStatus('waitingApproval')
+
+        // Poll for approval confirmation via RPC
+        const rpc = getRpcUrl(fromChain)
+        if (rpc) {
+          let confirmed = false
+          for (let attempt = 0; attempt < 60 && !confirmed; attempt++) {
+            await new Promise(r => setTimeout(r, 2000))
+            try {
+              const res = await fetch(rpc, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt',
+                  params: [appHash],
+                }),
+                signal: AbortSignal.timeout(5000),
+              })
+              const data = await res.json()
+              if (data?.result?.status === '0x1') {
+                confirmed = true
+              } else if (data?.result?.status === '0x0') {
+                throw new Error('Approval transaction reverted')
+              }
+            } catch (e: any) {
+              if (e.message?.includes('reverted')) throw e
+            }
+          }
+          if (!confirmed) throw new Error('Approval confirmation timed out')
+        } else {
+          // Fallback: wait a fixed time if no RPC
+          await new Promise(r => setTimeout(r, 8000))
+        }
       }
 
       setTxStatus('swapping')
@@ -693,9 +832,11 @@ export default function SwapPage() {
   const dstAmountUsd = quote?.estimate.toAmountUSD
     ? `$${parseFloat(quote.estimate.toAmountUSD).toFixed(2)}` : null
 
-  const isCrossChain = fromChain.id !== toChain.id
-  const wrongChain   = isConnected && connectedChainId !== fromChain.id
-  const canSwap      = isConnected && !!quote && !quoteExpired && !!amount && txStatus === 'idle' && !wrongChain
+  const wrongChain = isConnected && connectedChainId !== fromChain.id
+
+  // FIX #3 + #4: canSwap now checks balance and same-token
+  const canSwap = isConnected && !!quote && !quoteExpired && !!amount
+    && txStatus === 'idle' && !wrongChain && !insufficientBalance && !isSameToken
 
   const explorerTxUrl = useMemo(() => {
     if (!txHash) return null
@@ -713,8 +854,55 @@ export default function SwapPage() {
     return total > 0 ? total.toFixed(2) : null
   }, [quote])
 
-  const estimatedTime = quote?.estimate.executionDuration
-    ? Math.max(1, Math.round(quote.estimate.executionDuration / 60)) : null
+  // FIX #9: Better estimated time for same-chain
+  const estimatedTime = useMemo(() => {
+    if (!quote?.estimate.executionDuration) return null
+    const secs = quote.estimate.executionDuration
+    if (!isCrossChain && secs < 60) return `${Math.max(2, secs)}s`
+    return `~${Math.max(1, Math.round(secs / 60))} min`
+  }, [quote, isCrossChain])
+
+  // FIX #5: Exchange rate display
+  const exchangeRate = useMemo(() => {
+    if (!quote || !amount) return null
+    try {
+      const fromAmt = parseFloat(amount)
+      const toAmt = parseFloat(dstAmount.replace(/,/g, ''))
+      if (isNaN(fromAmt) || isNaN(toAmt) || fromAmt <= 0) return null
+      const rate = toAmt / fromAmt
+      const fmtRate = rate >= 1000 ? rate.toLocaleString('en-US', { maximumFractionDigits: 2 })
+        : rate >= 1 ? rate.toFixed(4) : rate.toFixed(6)
+      return `1 ${fromToken.symbol} ≈ ${fmtRate} ${toToken.symbol}`
+    } catch { return null }
+  }, [quote, amount, dstAmount, fromToken.symbol, toToken.symbol])
+
+  // FIX #6: Price impact calculation
+  const priceImpact = useMemo(() => {
+    if (!quote?.estimate.fromAmountUSD || !quote?.estimate.toAmountUSD) return null
+    const fromUsd = parseFloat(quote.estimate.fromAmountUSD)
+    const toUsd   = parseFloat(quote.estimate.toAmountUSD)
+    if (fromUsd <= 0) return null
+    return ((toUsd - fromUsd) / fromUsd) * 100
+  }, [quote])
+
+  const priceImpactSeverity = priceImpact !== null
+    ? (priceImpact <= -5 ? 'high' : priceImpact <= -2 ? 'medium' : 'low')
+    : 'low'
+
+  // CTA button label
+  const ctaLabel = useMemo(() => {
+    if (txStatus === 'approving')       return <><Loader size={16} className="animate-spin" /> Approving…</>
+    if (txStatus === 'waitingApproval') return <><Loader size={16} className="animate-spin" /> Waiting for approval…</>
+    if (txStatus === 'swapping')        return <><Loader size={16} className="animate-spin" /> Sending…</>
+    if (txStatus === 'pending')         return <><Loader size={16} className="animate-spin" /> Confirming…</>
+    if (quoteLoading)                   return 'Finding best route…'
+    if (!amount)                        return 'Enter an amount'
+    if (isSameToken)                    return 'Select a different token'
+    if (insufficientBalance)            return 'Insufficient balance'
+    if (!quote)                         return 'No route found'
+    if (quoteExpired)                   return 'Quote expired — refresh'
+    return 'Swap'
+  }, [txStatus, quoteLoading, amount, isSameToken, insufficientBalance, quote, quoteExpired])
 
   // ── RENDER ────────────────────────────────────────────────────────────────
   return (
@@ -733,6 +921,15 @@ export default function SwapPage() {
       </div>
 
       <div className="card p-5 space-y-3">
+
+        {/* Slippage Settings Button */}
+        <div className="flex justify-end">
+          <button onClick={() => setModal('slippage')}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-gray-50 border border-gray-100 hover:border-violet-300 hover:bg-violet-50 transition-colors text-xs font-medium text-gray-500 hover:text-violet-600">
+            <Settings size={12} />
+            Slippage: {activeSlippage * 100}%
+          </button>
+        </div>
 
         {/* FROM */}
         <div className="rounded-xl bg-gray-50 border border-gray-100 p-4 space-y-3">
@@ -755,16 +952,26 @@ export default function SwapPage() {
             <div className="flex-1 flex flex-col items-end gap-1 min-w-0">
               <input type="number" min="0" placeholder="0.00" value={amount}
                 onChange={e => { const v = e.target.value; if (v === '' || Number(v) >= 0) setAmount(v) }}
-                className="w-full bg-transparent text-right text-2xl font-semibold text-gray-800 outline-none placeholder-gray-300" />
-              {isConnected && fromBalanceDisplay !== null && (
+                className={`w-full bg-transparent text-right text-2xl font-semibold outline-none placeholder-gray-300 ${insufficientBalance ? 'text-red-500' : 'text-gray-800'}`} />
+              {isConnected && (
                 <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-gray-400">
-                    Balance: <span className="text-gray-500 font-medium">{fromBalanceDisplay} {fromToken.symbol}</span>
-                  </span>
-                  <button onClick={handleMax}
-                    className="text-xs font-semibold text-violet-500 hover:text-violet-700 bg-violet-50 hover:bg-violet-100 px-1.5 py-0.5 rounded transition-colors">
-                    MAX
-                  </button>
+                  {balanceError ? (
+                    <span className="text-xs text-amber-500">Balance unavailable</span>
+                  ) : fromBalanceDisplay !== null ? (
+                    <>
+                      <span className="text-xs text-gray-400">
+                        Balance: <span className={`font-medium ${insufficientBalance ? 'text-red-500' : 'text-gray-500'}`}>
+                          {fromBalanceDisplay} {fromToken.symbol}
+                        </span>
+                      </span>
+                      <button onClick={handleMax}
+                        className="text-xs font-semibold text-violet-500 hover:text-violet-700 bg-violet-50 hover:bg-violet-100 px-1.5 py-0.5 rounded transition-colors">
+                        MAX
+                      </button>
+                    </>
+                  ) : (
+                    <span className="text-xs text-gray-300">Loading balance…</span>
+                  )}
                 </div>
               )}
             </div>
@@ -815,6 +1022,13 @@ export default function SwapPage() {
           </div>
         </div>
 
+        {/* FIX #4: Same token warning */}
+        {isSameToken && (
+          <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-amber-50 border border-amber-100 text-sm text-amber-600">
+            <AlertTriangle size={14} /> Select a different destination token
+          </div>
+        )}
+
         {/* Receiver */}
         {isCrossChain && (
           <div className="rounded-xl bg-gray-50 border border-gray-100 p-3">
@@ -848,10 +1062,50 @@ export default function SwapPage() {
                 <span className={`text-xs font-medium ${quoteAge > 45 ? 'text-amber-500' : 'text-gray-500'}`}>{Math.max(0, 60 - quoteAge)}s</span>
               </div>
             )}
+
+            {/* FIX #5: Exchange rate */}
+            {exchangeRate && (
+              <div className="flex justify-between px-4 py-2.5">
+                <span className="text-gray-500">Rate</span>
+                <span className="font-medium text-gray-700">{exchangeRate}</span>
+              </div>
+            )}
+
+            {/* FIX #6: Price impact */}
+            {priceImpact !== null && (
+              <div className="flex justify-between px-4 py-2.5">
+                <span className="text-gray-500">Price impact</span>
+                <span className={`font-medium ${
+                  priceImpactSeverity === 'high' ? 'text-red-600' :
+                  priceImpactSeverity === 'medium' ? 'text-amber-600' : 'text-emerald-600'
+                }`}>
+                  {priceImpact > 0 ? '+' : ''}{priceImpact.toFixed(2)}%
+                </span>
+              </div>
+            )}
+
+            {/* FIX #6: High price impact warning */}
+            {priceImpactSeverity === 'high' && (
+              <div className="flex items-center gap-2 px-4 py-2.5 bg-red-50/80">
+                <AlertTriangle size={13} className="text-red-500 shrink-0" />
+                <span className="text-xs text-red-600 font-medium">
+                  High price impact! You may receive significantly less than expected.
+                </span>
+              </div>
+            )}
+            {priceImpactSeverity === 'medium' && (
+              <div className="flex items-center gap-2 px-4 py-2.5 bg-amber-50/80">
+                <AlertTriangle size={13} className="text-amber-500 shrink-0" />
+                <span className="text-xs text-amber-600 font-medium">
+                  Moderate price impact — consider a smaller trade.
+                </span>
+              </div>
+            )}
+
             {estimatedTime && (
               <div className="flex justify-between px-4 py-2.5">
                 <span className="text-gray-500">Estimated time</span>
-                <span className="font-medium text-gray-700">~{estimatedTime} min</span>
+                <span className="font-medium text-gray-700">{estimatedTime}</span>
               </div>
             )}
             {totalFeesUsd && (
@@ -862,7 +1116,10 @@ export default function SwapPage() {
             )}
             <div className="flex justify-between px-4 py-2.5">
               <span className="text-gray-500">Slippage tolerance</span>
-              <span className="font-medium text-gray-700">{(isCrossChain ? SLIPPAGE_CROSS : SLIPPAGE_ON_CHAIN) * 100}%</span>
+              <button onClick={() => setModal('slippage')}
+                className="font-medium text-violet-600 hover:text-violet-800 underline decoration-dotted underline-offset-2 transition-colors">
+                {activeSlippage * 100}%
+              </button>
             </div>
             <div className="flex justify-between px-4 py-2.5">
               <span className="text-gray-500">Route</span>
@@ -871,7 +1128,7 @@ export default function SwapPage() {
           </div>
         )}
 
-        {quoteError && (
+        {quoteError && !isSameToken && (
           <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-red-50 border border-red-100 text-sm text-red-500">
             <XCircle size={14} /> {quoteError}
           </div>
@@ -897,7 +1154,7 @@ export default function SwapPage() {
                 View on explorer <ExternalLink size={11} />
               </a>
             )}
-            <button onClick={() => { setTxStatus('idle'); setTxHash(null); setAmount(''); setQuote(null) }}
+            <button onClick={() => { setTxStatus('idle'); setTxHash(null); setAmount(''); setQuote(null); setApprovalHash(undefined) }}
               className="mt-1 text-sm text-gray-500 hover:text-gray-700 underline">New swap</button>
           </div>
         ) : txStatus === 'error' ? (
@@ -905,7 +1162,7 @@ export default function SwapPage() {
             <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-red-50 border border-red-100 text-sm text-red-500">
               <XCircle size={14} /> {txError ?? 'Transaction failed'}
             </div>
-            <button onClick={() => { setTxStatus('idle'); setTxError(null) }}
+            <button onClick={() => { setTxStatus('idle'); setTxError(null); setApprovalHash(undefined) }}
               className="w-full py-3 rounded-xl border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 transition-colors">
               Try again
             </button>
@@ -918,10 +1175,7 @@ export default function SwapPage() {
               color: canSwap ? 'white' : '#9ca3af',
               boxShadow: canSwap ? '0 4px 16px rgba(131,110,249,0.35)' : 'none',
             }}>
-            {txStatus === 'approving' && <><Loader size={16} className="animate-spin" /> Approving…</>}
-            {txStatus === 'swapping'  && <><Loader size={16} className="animate-spin" /> Sending…</>}
-            {txStatus === 'pending'   && <><Loader size={16} className="animate-spin" /> Confirming…</>}
-            {txStatus === 'idle' && (quoteLoading ? 'Finding best route…' : !amount ? 'Enter an amount' : !quote ? 'No route found' : quoteExpired ? 'Quote expired — refresh' : 'Swap')}
+            {ctaLabel}
           </button>
         )}
       </div>
@@ -947,6 +1201,9 @@ export default function SwapPage() {
       )}
       {modal === 'toToken' && (
         <TokenModal chain={toChain} onSelect={t => { setToToken(t); setQuote(null) }} onClose={() => setModal(null)} />
+      )}
+      {modal === 'slippage' && (
+        <SlippageModal value={activeSlippage} onChange={v => { setActiveSlippage(v); setQuote(null) }} onClose={() => setModal(null)} />
       )}
     </div>
   )
