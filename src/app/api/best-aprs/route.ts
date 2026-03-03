@@ -42,7 +42,8 @@ const PROTOCOL_META: Record<string, { name: string; logo: string; urlBase: strin
   'morpho':         { name: 'Morpho',       logo: 'https://icons.llamao.fi/icons/protocols/morpho?w=48&h=48',      urlBase: 'https://app.morpho.org' },
   'beefy':          { name: 'Beefy',        logo: 'https://icons.llamao.fi/icons/protocols/beefy?w=48&h=48',       urlBase: 'https://app.beefy.com' },
   'yearn-finance':  { name: 'Yearn',        logo: 'https://icons.llamao.fi/icons/protocols/yearn-finance?w=48&h=48', urlBase: 'https://yearn.fi/vaults' },
-  'tydro':          { name: 'Tydro',        logo: 'https://icons.llamao.fi/icons/protocols/tydro?w=48&h=48',          urlBase: 'https://app.tydro.com' },
+  'tydro':          { name: 'Tydro',        logo: 'https://icons.llamao.fi/icons/protocols/tydro?w=48&h=48',       urlBase: 'https://app.tydro.com' },
+  'inkyswap':       { name: 'InkySwap',     logo: 'https://icons.llamao.fi/icons/protocols/inkyswap?w=48&h=48',    urlBase: 'https://inkyswap.com/liquidity' },
 }
 
 function inferType(project: string, poolMeta: string | null): 'pool' | 'vault' | 'lend' {
@@ -57,8 +58,6 @@ function inferType(project: string, poolMeta: string | null): 'pool' | 'vault' |
 }
 
 // ─── Velodrome on Ink (chain 57073) ─────────────────────────────────────────
-// Direct gauge RPC: Voter.gauges(pool) → gauge, Gauge.rewardRate() → emissions/sec
-// Source: github.com/velodrome-finance/indexer/blob/main/config.yaml
 const VOTER_INK    = '0x97cDBCe21B6fd0585d29E539B1B99dAd328a1123' as const
 const INK_RPC      = 'https://rpc-gel.inkonchain.com'
 const INK_RPC_ALT  = 'https://ink.drpc.org'
@@ -67,6 +66,12 @@ const GECKO_BASE   = 'https://api.geckoterminal.com/api/v2'
 const SECONDS_YEAR = 86400 * 365
 const XVELO_INK    = '0x7f9AdFbd38b669F03d1d11000Bc76b9AaEA28A81'
 const VELO_DEX_IDS = ['velodrome-finance-v2-ink', 'velodrome-finance-slipstream-ink']
+
+// ─── InkySwap on Ink ────────────────────────────────────────────────────────
+// Uniswap-style AMM (v2/v3/v4) with 0.05% trading fee, no emission rewards
+const INKY_DEX_ID  = 'inkyswap'
+const INKY_FEE     = 0.0005
+const INKY_URL     = 'https://inkyswap.com/liquidity'
 
 const VOTER_ABI: Abi = [{ name: 'gauges', type: 'function', stateMutability: 'view', inputs: [{ name: '_pool', type: 'address' }], outputs: [{ name: '', type: 'address' }] }]
 const GAUGE_ABI: Abi = [{ name: 'rewardRate', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint256' }] }]
@@ -269,6 +274,78 @@ async function fetchVelodromeData(): Promise<AprEntry[]> {
   return out
 }
 
+// ─── InkySwap: GeckoTerminal fee-only APR ───────────────────────────────────
+async function fetchInkySwapData(): Promise<AprEntry[]> {
+  const out: AprEntry[] = []
+  try {
+    const pages = [1, 2]
+    const allPools: any[] = [], allIncluded: any[] = []
+
+    await Promise.all(pages.map(async (page) => {
+      try {
+        const url = `${GECKO_BASE}/networks/ink/dexes/${INKY_DEX_ID}/pools?page=${page}&sort=h24_volume_usd_desc&include=base_token,quote_token`
+        const res = await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { Accept: 'application/json' } })
+        if (!res.ok) return
+        const json = await res.json()
+        allPools.push(...(json.data ?? []))
+        allIncluded.push(...(json.included ?? []))
+      } catch { /* skip page */ }
+    }))
+
+    if (allPools.length === 0) {
+      console.log(`[best-aprs] InkySwap: no pools from GeckoTerminal`)
+      return out
+    }
+
+    const tokenSymbols = new Map<string, string>()
+    for (const inc of allIncluded)
+      if (inc.type === 'token' && inc.attributes?.symbol) tokenSymbols.set(inc.id, inc.attributes.symbol)
+
+    const seen = new Set<string>()
+    for (const pool of allPools) {
+      const attrs = pool.attributes ?? {}
+      const addr = (attrs.address ?? '').toLowerCase()
+      if (!addr || seen.has(addr)) continue
+      seen.add(addr)
+
+      const poolName = attrs.name ?? ''
+      let base  = tokenSymbols.get(pool.relationships?.base_token?.data?.id ?? '') ?? ''
+      let quote = tokenSymbols.get(pool.relationships?.quote_token?.data?.id ?? '') ?? ''
+      if ((!base || !quote) && poolName.includes('/')) {
+        const [p0, p1] = poolName.split('/').map((s: string) => s.trim())
+        if (!base && p0) base = p0; if (!quote && p1) quote = p1
+      }
+      if (!base || !quote) continue
+
+      const tvl = parseFloat(attrs.reserve_in_usd ?? '0')
+      const vol24h = parseFloat(attrs.volume_usd?.h24 ?? '0')
+      if (tvl < 50) continue
+
+      const feeApr = tvl > 0 ? (vol24h * INKY_FEE * 365 / tvl) * 100 : 0
+      if (feeApr <= 0 && tvl < 500) continue
+      if (feeApr > 50_000) continue
+
+      const pairStable = allStable([base, quote])
+      out.push({
+        protocol: 'InkySwap',
+        logo: 'https://icons.llamao.fi/icons/protocols/inkyswap?w=48&h=48',
+        url: INKY_URL,
+        tokens: [base, quote],
+        label: `${base}-${quote}`,
+        apr: Math.round(feeApr * 100) / 100,
+        tvl,
+        type: 'pool',
+        isStable: pairStable,
+      })
+    }
+
+    const sorted = [...out].sort((a, b) => b.apr - a.apr)
+    for (const s of sorted.slice(0, 3)) console.log(`→ InkySwap ${s.label}: APR=${s.apr}% (tvl=$${s.tvl.toFixed(0)})`)
+    console.log(`[best-aprs] InkySwap: ${out.length} pools (fee-only APR @ ${INKY_FEE * 100}%)`)
+  } catch (e) { console.error('[best-aprs] InkySwap error:', e) }
+  return out
+}
+
 // ─── DefiLlama (non-Velodrome protocols on Ink) ─────────────────────────────
 async function fetchDefiLlama(): Promise<AprEntry[]> {
   const out: AprEntry[] = []
@@ -312,13 +389,15 @@ let cache: CacheEntry | null = null
 let inflight: Promise<AprEntry[]> | null = null
 
 async function fetchAllAprs(): Promise<AprEntry[]> {
-  const [v, l] = await Promise.allSettled([fetchVelodromeData(), fetchDefiLlama()])
+  const [v, i, l] = await Promise.allSettled([fetchVelodromeData(), fetchInkySwapData(), fetchDefiLlama()])
   const velo  = v.status === 'fulfilled' ? v.value : []
+  const inky  = i.status === 'fulfilled' ? i.value : []
   const llama = l.status === 'fulfilled' ? l.value : []
   if (v.status === 'rejected') console.error('[best-aprs] Velodrome failed:', v.reason)
+  if (i.status === 'rejected') console.error('[best-aprs] InkySwap failed:', i.reason)
   if (l.status === 'rejected') console.error('[best-aprs] DefiLlama failed:', l.reason)
-  const all = [...velo, ...llama]
-  console.log(`[best-aprs] Total: ${all.length} entries (${velo.length} Velodrome + ${llama.length} DefiLlama)`)
+  const all = [...velo, ...inky, ...llama]
+  console.log(`[best-aprs] Total: ${all.length} entries (${velo.length} Velodrome + ${inky.length} InkySwap + ${llama.length} DefiLlama)`)
   all.sort((a, b) => b.apr - a.apr || b.tvl - a.tvl)
   return all
 }
