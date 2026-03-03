@@ -13,6 +13,7 @@ interface AprEntry {
   tokens:     string[]
   label:      string
   apr:        number
+  tvl:        number
   type:       'pool' | 'vault' | 'lend'
   isStable:   boolean
 }
@@ -85,7 +86,14 @@ function AprCard({ entry, rank, showType = false }: { entry: AprEntry; rank: num
           {showType && <TypeBadge type={entry.type} />}
         </div>
         <p className="text-sm font-semibold text-gray-800 truncate mb-1.5" style={SORA}>{entry.label}</p>
-        <TokenPills tokens={entry.tokens} />
+        <div className="flex items-center gap-2">
+          <TokenPills tokens={entry.tokens} />
+          {entry.tvl > 0 && (
+            <span className="text-xs text-gray-400 font-medium">
+              TVL ${entry.tvl >= 1_000_000 ? `${(entry.tvl / 1_000_000).toFixed(1)}M` : entry.tvl >= 1_000 ? `${(entry.tvl / 1_000).toFixed(0)}K` : entry.tvl.toFixed(0)}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* APR + Link */}

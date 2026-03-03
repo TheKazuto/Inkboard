@@ -10,18 +10,102 @@ export interface AprEntry {
   tokens:     string[]
   label:      string
   apr:        number
+  tvl:        number
   type:       'pool' | 'vault' | 'lend'
   isStable:   boolean
 }
 
 // ─── Stablecoin classification ────────────────────────────────────────────────
 const STABLECOINS = new Set([
-  'USDC', 'USDC.e', 'USDT', 'USDT0', 'DAI', 'FRAX', 'frxUSD', 'sfrxUSD',
-  'crvUSD', 'BUSD', 'TUSD', 'LUSD', 'MIM', 'USD1', 'LVUSD',
+  'USDC', 'USDC.E', 'USDT', 'USDT0', 'DAI', 'FRAX', 'FRXUSD', 'SFRXUSD',
+  'CRVUSD', 'BUSD', 'TUSD', 'LUSD', 'MIM', 'USD1', 'LVUSD', 'USDE', 'SUSDE',
+  'DOLA', 'GUSD', 'SUSD', 'USDP', 'PYUSD', 'FDUSD',
 ])
 
-function isStable(sym: string): boolean { return STABLECOINS.has(sym) }
-function allStable(tokens: string[]): boolean { return tokens.length > 0 && tokens.every(isStable) }
+function isStable(sym: string): boolean {
+  return STABLECOINS.has(sym.toUpperCase())
+}
+function allStable(tokens: string[]): boolean {
+  return tokens.length > 0 && tokens.every(isStable)
+}
+
+// ─── Protocol metadata ───────────────────────────────────────────────────────
+// Map DefiLlama project slugs to display info
+const PROTOCOL_META: Record<string, { name: string; logo: string; urlBase: string }> = {
+  'velodrome-v3': {
+    name: 'Velodrome V3',
+    logo: 'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48',
+    urlBase: 'https://velodrome.finance/liquidity?filters=Ink',
+  },
+  'velodrome-v2': {
+    name: 'Velodrome V2',
+    logo: 'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48',
+    urlBase: 'https://velodrome.finance/liquidity?filters=Ink',
+  },
+  'velodrome': {
+    name: 'Velodrome',
+    logo: 'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48',
+    urlBase: 'https://velodrome.finance/liquidity?filters=Ink',
+  },
+  'curve-dex': {
+    name: 'Curve',
+    logo: 'https://icons.llamao.fi/icons/protocols/curve-dex?w=48&h=48',
+    urlBase: 'https://curve.fi/#/ink/pools',
+  },
+  'uniswap-v3': {
+    name: 'Uniswap V3',
+    logo: 'https://icons.llamao.fi/icons/protocols/uniswap?w=48&h=48',
+    urlBase: 'https://app.uniswap.org/explore/pools',
+  },
+  'uniswap-v4': {
+    name: 'Uniswap V4',
+    logo: 'https://icons.llamao.fi/icons/protocols/uniswap?w=48&h=48',
+    urlBase: 'https://app.uniswap.org/explore/pools',
+  },
+  'aave-v3': {
+    name: 'Aave V3',
+    logo: 'https://icons.llamao.fi/icons/protocols/aave-v3?w=48&h=48',
+    urlBase: 'https://app.aave.com/reserve-overview',
+  },
+  'morpho': {
+    name: 'Morpho',
+    logo: 'https://icons.llamao.fi/icons/protocols/morpho?w=48&h=48',
+    urlBase: 'https://app.morpho.org',
+  },
+  'beefy': {
+    name: 'Beefy',
+    logo: 'https://icons.llamao.fi/icons/protocols/beefy?w=48&h=48',
+    urlBase: 'https://app.beefy.com',
+  },
+  'yearn-finance': {
+    name: 'Yearn',
+    logo: 'https://icons.llamao.fi/icons/protocols/yearn-finance?w=48&h=48',
+    urlBase: 'https://yearn.fi/vaults',
+  },
+}
+
+// Infer pool type from DefiLlama project and pool metadata
+function inferType(project: string, poolMeta: string | null): 'pool' | 'vault' | 'lend' {
+  const p = project.toLowerCase()
+  const m = (poolMeta ?? '').toLowerCase()
+
+  // Lending protocols
+  if (p.includes('aave') || p.includes('compound') || p.includes('morpho') ||
+      p.includes('silo') || p.includes('euler') || p.includes('fraxlend') ||
+      m.includes('lend') || m.includes('supply') || m.includes('borrow')) {
+    return 'lend'
+  }
+
+  // Vault / yield aggregator protocols
+  if (p.includes('beefy') || p.includes('yearn') || p.includes('convex') ||
+      p.includes('stakedao') || p.includes('concentrator') ||
+      m.includes('vault') || m.includes('auto')) {
+    return 'vault'
+  }
+
+  // Default: liquidity pool
+  return 'pool'
+}
 
 // ─── Server-side cache ────────────────────────────────────────────────────────
 const CACHE_TTL = 3 * 60 * 1000 // 3 minutes
@@ -34,157 +118,88 @@ interface CacheEntry {
 let cache: CacheEntry | null = null
 let inflight: Promise<AprEntry[]> | null = null
 
-// ─── Curve (Ink) ──────────────────────────────────────────────────────────────
-async function fetchCurve(): Promise<AprEntry[]> {
+// ─── DefiLlama Yields API ────────────────────────────────────────────────────
+// Free endpoint, returns all pools across all chains and protocols.
+// We filter server-side for chain=Ink.
+// Docs: https://defillama.com/docs/api
+async function fetchDefiLlama(): Promise<AprEntry[]> {
   const out: AprEntry[] = []
   try {
-    // Try both factory types for Ink
-    const factoryTypes = ['factory-twocrypto', 'factory-stable']
-    
-    for (const factory of factoryTypes) {
-      try {
-        const res = await fetch(
-          `https://api-core.curve.finance/v1/getPools/ink/${factory}`,
-          { signal: AbortSignal.timeout(10_000) }
-        )
-        if (!res.ok) continue
-        const json = await res.json()
-        const pools = json?.data?.poolData ?? []
-
-        for (const p of pools) {
-          const symbols = (p.coins ?? []).map((c: any) => c.symbol ?? '?')
-          const tvl = p.usdTotal ?? 0
-          if (tvl < 1_000) continue // skip tiny pools
-
-          // Estimate APR from virtualPrice change if available
-          let apr = 0
-          if (p.gaugeCrvApy && Array.isArray(p.gaugeCrvApy) && p.gaugeCrvApy.length > 0) {
-            apr = p.gaugeCrvApy[0] ?? 0
-          }
-          if (!apr && p.apy) {
-            apr = typeof p.apy === 'number' ? p.apy : 0
-          }
-
-          if (apr <= 0) continue
-
-          out.push({
-            protocol: 'Curve',
-            logo:     'https://icons.llamao.fi/icons/protocols/curve-dex?w=48&h=48',
-            url:      `https://curve.fi/#/ink/pools`,
-            tokens:   symbols,
-            label:    symbols.join('/'),
-            apr,
-            type:     'pool',
-            isStable: allStable(symbols),
-          })
-        }
-      } catch { /* skip factory type */ }
-    }
-  } catch (e) { console.error('[best-aprs] Curve error:', e) }
-  return out
-}
-
-// ─── Uniswap V3+V4 (Ink) ─────────────────────────────────────────────────────
-async function fetchUniswap(): Promise<AprEntry[]> {
-  const out: AprEntry[] = []
-  try {
-    const query = `{
-      v3Pools: topV3Pools(first: 50, chain: INK, orderBy: TVL) {
-        protocolVersion
-        address
-        token0 { symbol }
-        token1 { symbol }
-        tvl { value }
-        volume1Day: cumulativeVolume(duration: DAY) { value }
-        feeTier
-      }
-      v4Pools: topV4Pools(first: 50, chain: INK, orderBy: TVL) {
-        protocolVersion
-        poolId
-        token0 { symbol }
-        token1 { symbol }
-        tvl { value }
-        volume1Day: cumulativeVolume(duration: DAY) { value }
-        feeTier
-      }
-    }`
-
-    const res = await fetch('https://interface.gateway.uniswap.org/v1/graphql', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Origin': 'https://app.uniswap.org',
-      },
-      body: JSON.stringify({ query }),
-      signal: AbortSignal.timeout(12_000),
+    const res = await fetch('https://yields.llama.fi/pools', {
+      signal: AbortSignal.timeout(15_000),
+      headers: { 'Accept': 'application/json' },
     })
 
-    if (!res.ok) return out
+    if (!res.ok) {
+      console.error(`[best-aprs] DefiLlama HTTP ${res.status}`)
+      return out
+    }
+
     const json = await res.json()
+    const pools: any[] = json?.data ?? []
 
-    const v3 = json?.data?.v3Pools ?? []
-    const v4 = json?.data?.v4Pools ?? []
-    const allPools = [...v3, ...v4]
+    // Filter for Ink chain only
+    const inkPools = pools.filter((p: any) =>
+      p.chain?.toLowerCase() === 'ink'
+    )
 
-    for (const p of allPools) {
-      const sym0 = p.token0?.symbol ?? '?'
-      const sym1 = p.token1?.symbol ?? '?'
-      const tvl = p.tvl?.value ?? 0
-      const vol = p.volume1Day?.value ?? 0
-      const fee = (p.feeTier ?? 3000) / 1_000_000
+    console.log(`[best-aprs] DefiLlama: ${pools.length} total pools, ${inkPools.length} on Ink`)
 
-      if (tvl < 1_000) continue
+    for (const p of inkPools) {
+      const project = p.project ?? ''
+      const symbol  = p.symbol ?? ''
+      const apy     = p.apy ?? 0         // Total APY (base + reward)
+      const apyBase = p.apyBase ?? 0     // Base APY from fees
+      const tvl     = p.tvlUsd ?? 0
 
-      const dailyFeeRev = vol * fee
-      const apr = tvl > 0 ? (dailyFeeRev / tvl) * 365 * 100 : 0
+      // Skip tiny pools and zero APY
+      if (tvl < 500 || apy <= 0) continue
 
-      if (apr <= 0 || apr > 50_000) continue
+      // Cap unrealistic APYs (>50000% likely error)
+      if (apy > 50_000) continue
 
-      const version = p.protocolVersion === 'V4' ? 'V4' : 'V3'
-      const id = p.address ?? p.poolId ?? ''
+      // Parse token symbols from the symbol field (e.g. "USDC-WETH" or "USDC")
+      const tokens = symbol
+        .split(/[-\/]/)
+        .map((t: string) => t.trim())
+        .filter(Boolean)
+
+      // Use APY as displayed (DefiLlama already annualizes)
+      const apr = apy
+
+      const type = inferType(project, p.poolMeta ?? null)
+
+      // Get protocol display info
+      const meta = PROTOCOL_META[project] ?? {
+        name: project.replace(/-/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
+        logo: `https://icons.llamao.fi/icons/protocols/${project}?w=48&h=48`,
+        urlBase: '#',
+      }
 
       out.push({
-        protocol: `Uniswap ${version}`,
-        logo:     'https://icons.llamao.fi/icons/protocols/uniswap?w=48&h=48',
-        url:      `https://app.uniswap.org/pool/${id}`,
-        tokens:   [sym0, sym1],
-        label:    `${sym0}/${sym1}`,
+        protocol: meta.name,
+        logo:     meta.logo,
+        url:      meta.urlBase,
+        tokens,
+        label:    symbol,
         apr,
-        type:     'pool',
-        isStable: allStable([sym0, sym1]),
+        tvl,
+        type,
+        isStable: allStable(tokens),
       })
     }
-  } catch (e) { console.error('[best-aprs] Uniswap error:', e) }
+  } catch (e) {
+    console.error('[best-aprs] DefiLlama error:', e)
+  }
   return out
 }
-
-// ─── Velodrome Slipstream (Ink) ───────────────────────────────────────────────
-// TODO: Add Velodrome API integration when scanner is ready
-// API endpoint: https://api.velodrome.finance or sugar subgraph
-
-// ─── Aave (Ink) ──────────────────────────────────────────────────────────────
-// TODO: Add Aave integration when deployed/scanner ready
-
-// ─── Frax (Ink) ──────────────────────────────────────────────────────────────
-// TODO: Add Frax vault APRs (sfrxUSD, sfrxETH)
-
-// ─── InkySwap (Ink) ──────────────────────────────────────────────────────────
-// TODO: Add InkySwap integration
 
 // ─── Main fetch function ──────────────────────────────────────────────────────
 async function fetchAllAprs(): Promise<AprEntry[]> {
-  const results = await Promise.allSettled([
-    fetchCurve(),
-    fetchUniswap(),
-  ])
+  const all = await fetchDefiLlama()
 
-  const all: AprEntry[] = []
-  for (const r of results) {
-    if (r.status === 'fulfilled') all.push(...r.value)
-  }
-
-  // Sort by APR descending
-  all.sort((a, b) => b.apr - a.apr)
+  // Sort by APR descending, with TVL as tiebreaker
+  all.sort((a, b) => b.apr - a.apr || b.tvl - a.tvl)
   return all
 }
 
@@ -212,11 +227,8 @@ export async function GET() {
     })
   } catch (e) {
     console.error('[best-aprs] Fatal:', e)
-    // Fallback to stale cache
     if (cache) {
-      return NextResponse.json(cache.data, {
-        headers: { 'X-Cache': 'STALE' },
-      })
+      return NextResponse.json(cache.data, { headers: { 'X-Cache': 'STALE' } })
     }
     return NextResponse.json([], { status: 502 })
   }
