@@ -19,7 +19,7 @@ export interface AprEntry {
 const STABLECOINS = new Set([
   'USDC', 'USDC.E', 'USDT', 'USDT0', 'DAI', 'FRAX', 'FRXUSD', 'SFRXUSD',
   'CRVUSD', 'BUSD', 'TUSD', 'LUSD', 'MIM', 'USD1', 'LVUSD', 'USDE', 'SUSDE',
-  'DOLA', 'GUSD', 'SUSD', 'USDP', 'PYUSD', 'FDUSD',
+  'DOLA', 'GUSD', 'SUSD', 'USDP', 'PYUSD', 'FDUSD', 'USDG',
 ])
 
 function isStable(sym: string): boolean {
@@ -212,9 +212,125 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
   return out
 }
 
+// ─── DexScreener API for Velodrome on Ink ─────────────────────────────────────
+// DexScreener indexes Velodrome pools on Ink even though DefiLlama doesn't.
+// We query by known Ink token addresses and filter for Velodrome dexId.
+// APR is estimated from 24h volume * fee rate * 365 / liquidity.
+const INK_TOKENS = [
+  '0x4200000000000000000000000000000000000006', // WETH
+  '0xF1815bd50670a7d54d3B88daeddea88960E8e8a9', // USDC.e
+  '0x0200C29006150606B650577BBE7B6248F58470c1', // USDT0
+]
+
+// Velodrome fee rates by pool type
+const VELO_FEE_STABLE  = 0.0001  // 0.01% for stable pools
+const VELO_FEE_DEFAULT = 0.003   // 0.3% for volatile/CL pools
+
+async function fetchDexScreenerVelodrome(): Promise<AprEntry[]> {
+  const out: AprEntry[] = []
+  const seen = new Set<string>() // dedup by pairAddress
+
+  try {
+    // Fetch pairs for each known Ink token in parallel
+    const fetches = INK_TOKENS.map(async (tokenAddr) => {
+      try {
+        const res = await fetch(
+          `https://api.dexscreener.com/token-pairs/v1/ink/${tokenAddr}`,
+          { signal: AbortSignal.timeout(10_000) }
+        )
+        if (!res.ok) return []
+        const pairs: any[] = await res.json()
+        return Array.isArray(pairs) ? pairs : []
+      } catch {
+        return []
+      }
+    })
+
+    const results = await Promise.all(fetches)
+    const allPairs = results.flat()
+
+    console.log(`[best-aprs] DexScreener: ${allPairs.length} total Ink pairs found`)
+
+    for (const p of allPairs) {
+      // Only Velodrome pairs
+      const dexId = (p.dexId ?? '').toLowerCase()
+      if (!dexId.includes('velodrome')) continue
+
+      const pairAddr = p.pairAddress ?? ''
+      if (seen.has(pairAddr)) continue
+      seen.add(pairAddr)
+
+      const base  = p.baseToken?.symbol ?? ''
+      const quote = p.quoteToken?.symbol ?? ''
+      if (!base || !quote) continue
+
+      const liqUsd  = p.liquidity?.usd ?? 0
+      const vol24h  = p.volume?.h24 ?? 0
+
+      // Skip tiny pools
+      if (liqUsd < 100) continue
+
+      // Determine if stable pool
+      const labels = (p.labels ?? []).map((l: string) => l.toLowerCase())
+      const pairIsStable = labels.includes('stable') || (allStable([base, quote]))
+
+      // Estimate fee APR
+      const feeRate = pairIsStable ? VELO_FEE_STABLE : VELO_FEE_DEFAULT
+      const feeApr = liqUsd > 0 ? (vol24h * feeRate * 365 / liqUsd) * 100 : 0
+
+      // Skip zero or unrealistic APR
+      if (feeApr <= 0 || feeApr > 50_000) continue
+
+      // Determine version from dexId
+      const isSlipstream = dexId.includes('slipstream') || dexId.includes('cl')
+      const versionName = isSlipstream ? 'Velodrome Slipstream' : 'Velodrome V2'
+
+      const tokens = [base, quote]
+      const label  = `${base}-${quote}${pairIsStable ? ' (stable)' : ''}`
+
+      out.push({
+        protocol: versionName,
+        logo:     'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48',
+        url:      p.url ?? 'https://velodrome.finance/liquidity?filters=Ink',
+        tokens,
+        label,
+        apr:      Math.round(feeApr * 100) / 100,
+        tvl:      liqUsd,
+        type:     'pool',
+        isStable: pairIsStable,
+      })
+    }
+
+    console.log(`[best-aprs] DexScreener: ${out.length} Velodrome pools on Ink after filtering`)
+  } catch (e) {
+    console.error('[best-aprs] DexScreener error:', e)
+  }
+  return out
+}
+
 // ─── Main fetch function ──────────────────────────────────────────────────────
 async function fetchAllAprs(): Promise<AprEntry[]> {
-  const all = await fetchDefiLlama()
+  // Fetch from both sources in parallel
+  const [defiLlama, velodrome] = await Promise.all([
+    fetchDefiLlama(),
+    fetchDexScreenerVelodrome(),
+  ])
+
+  // Merge: DefiLlama pools + Velodrome pools (dedup by token pair + protocol)
+  const all = [...defiLlama]
+  const existingKeys = new Set(
+    defiLlama.map(e => `${[...e.tokens].sort().join('-')}:${e.protocol.toLowerCase()}`)
+  )
+
+  for (const v of velodrome) {
+    const key = `${[...v.tokens].sort().join('-')}:${v.protocol.toLowerCase()}`
+    if (!existingKeys.has(key)) {
+      all.push(v)
+      existingKeys.add(key)
+    }
+  }
+
+  console.log(`[best-aprs] Total: ${all.length} entries (${defiLlama.length} DefiLlama + ${velodrome.length} Velodrome)`)
 
   // Sort by APR descending, with TVL as tiebreaker
   all.sort((a, b) => b.apr - a.apr || b.tvl - a.tvl)
