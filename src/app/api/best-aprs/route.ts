@@ -180,15 +180,24 @@ async function fetchGeckoPools(): Promise<GeckoPool[]> {
   const out: GeckoPool[] = [], seen = new Set<string>()
   const FEE_STABLE = 0.0001, FEE_DEFAULT = 0.003
 
-  const results = await Promise.all(VELO_DEX_IDS.map(async (dexId) => {
+  // Fetch SEQUENTIALLY — 2 concurrent GeckoTerminal requests trigger 429 rate limit
+  const results: { dexId: string; pools: any[]; included: any[] }[] = []
+  for (const dexId of VELO_DEX_IDS) {
     try {
       const url = `${GECKO_BASE}/networks/ink/dexes/${dexId}/pools?page=1&sort=h24_volume_usd_desc&include=base_token,quote_token`
       const res = await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { Accept: 'application/json' } })
-      if (!res.ok) return { dexId, pools: [], included: [] }
+      if (!res.ok) {
+        console.error(`[best-aprs] GeckoTerminal ${dexId} HTTP ${res.status}`)
+        results.push({ dexId, pools: [], included: [] })
+        continue
+      }
       const json = await res.json()
-      return { dexId, pools: json.data ?? [], included: json.included ?? [] }
-    } catch { return { dexId, pools: [], included: [] } }
-  }))
+      results.push({ dexId, pools: json.data ?? [], included: json.included ?? [] })
+    } catch (e) {
+      console.error(`[best-aprs] GeckoTerminal ${dexId} error:`, e)
+      results.push({ dexId, pools: [], included: [] })
+    }
+  }
 
   const tokenSymbols = new Map<string, string>()
   for (const { included } of results)
@@ -225,14 +234,21 @@ async function fetchGeckoPools(): Promise<GeckoPool[]> {
 
 // ─── Combined Velodrome: on-chain emissions + GeckoTerminal TVL/fees ────────
 async function fetchVelodromeData(): Promise<AprEntry[]> {
-  const [priceResult, poolsResult] = await Promise.allSettled([fetchVeloPrice(), fetchGeckoPools()])
-  const veloPrice  = priceResult.status  === 'fulfilled' ? priceResult.value  : 0
-  const geckoPools = poolsResult.status === 'fulfilled' ? poolsResult.value : []
+  // Fetch pools FIRST (critical path) — avoids 3 concurrent GeckoTerminal
+  // requests that trigger rate limiting on cold start
+  const geckoPools = await fetchGeckoPools().catch(e => {
+    console.error('[best-aprs] fetchGeckoPools failed:', e)
+    return [] as GeckoPool[]
+  })
   if (geckoPools.length === 0) return []
 
-  let emissions = new Map<string, number>()
-  try { emissions = await fetchGaugeEmissions(geckoPools.map(g => g.address)) }
-  catch (e) { console.error('[best-aprs] Gauge emissions failed:', e) }
+  // Price + emissions in parallel (GeckoTerminal/CoinGecko + RPC — different APIs)
+  const [priceResult, emissionsResult] = await Promise.allSettled([
+    fetchVeloPrice(),
+    fetchGaugeEmissions(geckoPools.map(g => g.address)),
+  ])
+  const veloPrice = priceResult.status === 'fulfilled' ? priceResult.value : 0
+  const emissions = emissionsResult.status === 'fulfilled' ? emissionsResult.value : new Map<string, number>()
 
 
   const out: AprEntry[] = []
@@ -370,8 +386,24 @@ export async function GET() {
 
   try {
     const data = await inflight
-    await kvSet('best-aprs', data, HARD_TTL)
-    return NextResponse.json(data, { headers: { 'X-Cache': 'MISS', 'Cache-Control': 'public, max-age=60' } })
+    const hasVelo = data.some(e => e.protocol.startsWith('Velodrome'))
+
+    if (hasVelo || data.length > 10) {
+      // Complete result — cache normally
+      await kvSet('best-aprs', data, HARD_TTL)
+      return NextResponse.json(data, { headers: { 'X-Cache': 'MISS', 'Cache-Control': 'public, max-age=60' } })
+    }
+
+    // Partial result (Velodrome missing) — short 15s cache so we retry quickly
+    await kvSet('best-aprs', data, 30)
+    console.warn(`[best-aprs] Partial: ${data.length} entries, no Velodrome — short cache`)
+
+    // Prefer stale complete data over fresh partial data
+    if (cached.data && cached.data.some(e => e.protocol.startsWith('Velodrome'))) {
+      return NextResponse.json(cached.data, { headers: { 'X-Cache': 'STALE-FULL', 'Cache-Control': 'public, max-age=15' } })
+    }
+
+    return NextResponse.json(data, { headers: { 'X-Cache': 'PARTIAL', 'Cache-Control': 'public, max-age=15' } })
   } catch (e) {
     console.error('[best-aprs] Fatal:', e)
     if (cached.data) return NextResponse.json(cached.data, { headers: { 'X-Cache': 'STALE' } })
