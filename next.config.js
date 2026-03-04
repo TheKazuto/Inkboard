@@ -101,13 +101,10 @@ const nextConfig = {
   async headers() {
     return [
       {
-        source: '/(.*)',
+        // Exclude /ad.html — it has its own permissive CSP via <meta> tag
+        source: '/((?!ad\\.html$).*)',
         headers: [
-          // Fix #1 (CRÍTICO): Strict CSP — removes unsafe-eval/unsafe-inline from script-src
-          // /ad.html has its own permissive CSP via <meta> tag (not affected by this header)
           { key: 'Content-Security-Policy', value: CSP },
-
-          // Fix #14 (MÉDIO): Previously missing security headers
           { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
           { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
           { key: 'X-Content-Type-Options', value: 'nosniff' },
