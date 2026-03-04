@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { encodeFunctionData, decodeFunctionResult, type Abi } from 'viem'
 import { INK_RPC } from '@/lib/ink'
+import { kvGet, kvSet } from '@/lib/kvCache'
 
 export const revalidate = 0
 
@@ -150,9 +151,7 @@ async function fetchGaugeEmissions(poolAddresses: string[]): Promise<Map<string,
   return emissions
 }
 
-// ─── VELO price (GeckoTerminal → priceService fallback) ─────────────────────
-import { getPrice } from '@/lib/priceService'
-
+// ─── VELO price (GeckoTerminal → CoinGecko fallback) ────────────────────────
 async function fetchVeloPrice(): Promise<number> {
   try {
     const res = await fetch(`${GECKO_BASE}/simple/networks/ink/token_price/${XVELO_INK}`, { signal: AbortSignal.timeout(8_000), headers: { Accept: 'application/json' } })
@@ -161,10 +160,15 @@ async function fetchVeloPrice(): Promise<number> {
       if (price > 0) { return price }
     }
   } catch { /* fall through */ }
-  // Fallback: use centralized priceService (shared KV cache, no extra CoinGecko call)
   try {
-    const price = await getPrice('velodrome-finance')
-    if (price > 0) return price
+    const cgHeaders: Record<string, string> = { 'Accept': 'application/json' }
+    const cgKey = process.env.COINGECKO_API_KEY
+    if (cgKey) cgHeaders['x-cg-demo-api-key'] = cgKey
+    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=velodrome-finance&vs_currencies=usd', { headers: cgHeaders, signal: AbortSignal.timeout(8_000) })
+    if (res.ok) {
+      const price = (await res.json())?.['velodrome-finance']?.usd ?? 0
+      if (price > 0) { return price }
+    }
   } catch { /* skip */ }
   return 0
 }
@@ -334,7 +338,6 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
 }
 
 // ─── Cache + GET ────────────────────────────────────────────────────────────
-import { kvGet, kvSet } from '@/lib/kvCache'
 
 const SOFT_TTL = 3 * 60 * 1000   // 3 minutes (ms) — consider stale after this
 const HARD_TTL = 10 * 60         // 10 minutes (seconds) — KV auto-deletes

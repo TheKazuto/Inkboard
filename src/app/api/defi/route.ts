@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { INK_RPC, rpcBatch } from '@/lib/ink'
+import { getAllPrices } from '@/lib/priceService'
 
 export const revalidate = 0
 
@@ -42,8 +43,6 @@ const STABLES = new Set([
   'USDC', 'USDC.e', 'USDT0', 'USDT', 'crvUSD', 'DAI', 'USDG', 'GHO',
   'frxUSD', 'sfrxUSD', 'BUSD', 'TUSD', 'LUSD',
 ])
-
-import { getAllPrices } from '@/lib/priceService'
 
 async function getTokenPricesUSD(symbols: string[]): Promise<Record<string, number>> {
   const prices: Record<string, number> = {}
