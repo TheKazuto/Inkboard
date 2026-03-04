@@ -9,13 +9,9 @@
   ],
   "routes": [
     {
-      "pattern": "inkboard.pro",
+      "pattern": "inkboardbeta.shinkalabs.workers.dev",
       "custom_domain": true
     },
-    {
-      "pattern": "www.inkboard.pro",
-      "custom_domain": true
-    }
   ],
   "assets": {
     "directory": ".open-next/assets",
