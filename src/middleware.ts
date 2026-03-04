@@ -45,6 +45,14 @@ function getClientIp(req: NextRequest): string {
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
 
+  // ── /ad.html: serve without restrictive CSP (ad.html has its own via meta tag)
+  if (pathname === '/ad.html') {
+    const res = NextResponse.next()
+    res.headers.delete('Content-Security-Policy')
+    res.headers.delete('X-Frame-Options')
+    return res
+  }
+
   // Only rate-limit API routes
   if (!pathname.startsWith('/api/')) {
     return NextResponse.next()
@@ -95,5 +103,5 @@ function addRateLimitHeaders(
 }
 
 export const config = {
-  matcher: '/api/:path*',
+  matcher: ['/api/:path*', '/ad.html'],
 }

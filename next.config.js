@@ -101,8 +101,7 @@ const nextConfig = {
   async headers() {
     return [
       {
-        // Exclude /ad.html — it has its own permissive CSP via <meta> tag
-        source: '/((?!ad\\.html$).*)',
+        source: '/(.*)',
         headers: [
           { key: 'Content-Security-Policy', value: CSP },
           { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
