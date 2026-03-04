@@ -145,8 +145,6 @@ export const KNOWN_TOKENS: KnownToken[] = [
 
 // ─── ETH price (delegates to centralized priceService) ────────────────────────
 
-import { getEthPriceFromService } from '@/lib/priceService'
-
 export interface EthPriceData {
   price:        number
   change24h:    number
@@ -155,10 +153,11 @@ export interface EthPriceData {
 
 /**
  * Fetch the current ETH/USD price + 24h change.
- * Delegates to the centralized priceService which batches ALL CoinGecko
- * price requests into a single call, KV-cached for 60s.
+ * Uses dynamic import so that routes which only need rpcBatch/KNOWN_TOKENS
+ * don't load the priceService → kvCache → @opennextjs/cloudflare chain.
  */
 export async function getEthPriceData(): Promise<EthPriceData> {
+  const { getEthPriceFromService } = await import('@/lib/priceService')
   return getEthPriceFromService()
 }
 
