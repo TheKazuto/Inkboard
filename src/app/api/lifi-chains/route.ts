@@ -1,14 +1,17 @@
 import { NextResponse } from 'next/server'
+import { kvGet, kvSet } from '@/lib/kvCache'
 
 export const revalidate = 0
 
 const LIFI_API = 'https://li.quest/v1'
-let cache: { data: unknown; ts: number } | null = null
-const TTL = 60 * 60 * 1000  // 1 hour — chain list is very stable
+const SOFT_TTL = 60 * 60 * 1000   // 1 hour — chain list is very stable
+const HARD_TTL = 4 * 60 * 60      // 4 hours (seconds) — stale fallback window
 
 export async function GET() {
-  if (cache && Date.now() - cache.ts < TTL) {
-    return NextResponse.json(cache.data)
+  const cached = await kvGet<unknown>('lifi-chains', SOFT_TTL)
+
+  if (cached.data && cached.fresh) {
+    return NextResponse.json(cached.data)
   }
 
   try {
@@ -18,12 +21,12 @@ export async function GET() {
     })
     if (!res.ok) throw new Error(`LI.FI ${res.status}`)
     const data = await res.json()
-    cache = { data, ts: Date.now() }
+    await kvSet('lifi-chains', data, HARD_TTL)
     return NextResponse.json(data)
   } catch (e: unknown) {
     console.error('[lifi-chains]', e instanceof Error ? e.message : e)
-    // Return cached data even if stale
-    if (cache) return NextResponse.json(cache.data)
+    // Return stale cached data on error
+    if (cached.data) return NextResponse.json(cached.data)
     return NextResponse.json({ chains: [] }, { status: 502 })
   }
 }

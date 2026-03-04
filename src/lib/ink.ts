@@ -143,7 +143,9 @@ export const KNOWN_TOKENS: KnownToken[] = [
   },
 ]
 
-// ─── ETH price (shared, cached) ───────────────────────────────────────────────
+// ─── ETH price (shared, KV-cached) ────────────────────────────────────────────
+
+import { kvGet, kvSet } from '@/lib/kvCache'
 
 export interface EthPriceData {
   price:        number
@@ -151,23 +153,22 @@ export interface EthPriceData {
   changeAmount: number
 }
 
-interface PriceEntry extends EthPriceData {
-  fetchedAt: number
-}
+const ETH_PRICE_SOFT_TTL = 60_000  // 60 seconds (ms) — consider fresh
+const ETH_PRICE_HARD_TTL = 5 * 60  // 5 minutes (seconds) — KV auto-deletes
 
-const ETH_PRICE_TTL = 60_000 // 60 seconds
-let ethPriceCache: PriceEntry | null = null
+// Inflight dedup stays in-memory — prevents concurrent CoinGecko requests
+// within the same isolate
 let ethPriceInflight: Promise<EthPriceData> | null = null
 
 /**
  * Fetch the current ETH/USD price + 24h change from CoinGecko.
- * Results are cached for 60 seconds so concurrent route handlers share one upstream call.
- * In-flight deduplication prevents parallel CoinGecko requests.
+ * Results are cached in KV so all Workers isolates share one upstream call.
+ * In-flight deduplication prevents parallel CoinGecko requests within the same isolate.
  */
 export async function getEthPriceData(): Promise<EthPriceData> {
-  const now = Date.now()
-  if (ethPriceCache && now - ethPriceCache.fetchedAt < ETH_PRICE_TTL) {
-    return ethPriceCache
+  const cached = await kvGet<EthPriceData>('eth-price', ETH_PRICE_SOFT_TTL)
+  if (cached.data && cached.fresh) {
+    return cached.data
   }
   if (ethPriceInflight) return ethPriceInflight
 
@@ -186,10 +187,11 @@ export async function getEthPriceData(): Promise<EthPriceData> {
       const change24h = (d?.ethereum?.usd_24h_change as number) ?? 0
       const prevPrice = price / (1 + change24h / 100)
       const data: EthPriceData = { price, change24h, changeAmount: price - prevPrice }
-      ethPriceCache = { ...data, fetchedAt: Date.now() }
+      await kvSet('eth-price', data, ETH_PRICE_HARD_TTL)
       return data
     } catch {
-      if (ethPriceCache) return ethPriceCache
+      // Return stale KV data on error
+      if (cached.data) return cached.data
       return { price: 0, change24h: 0, changeAmount: 0 }
     } finally {
       ethPriceInflight = null

@@ -337,9 +337,13 @@ async function fetchDefiLlama(): Promise<AprEntry[]> {
 }
 
 // ─── Cache + GET ────────────────────────────────────────────────────────────
-const CACHE_TTL = 3 * 60 * 1000
-interface CacheEntry { data: AprEntry[]; fetchedAt: number }
-let cache: CacheEntry | null = null
+import { kvGet, kvSet } from '@/lib/kvCache'
+
+const SOFT_TTL = 3 * 60 * 1000   // 3 minutes (ms) — consider stale after this
+const HARD_TTL = 10 * 60         // 10 minutes (seconds) — KV auto-deletes
+
+// Inflight dedup stays in-memory — prevents concurrent upstream fetches
+// within the same isolate (still useful even if cache is in KV)
 let inflight: Promise<AprEntry[]> | null = null
 
 async function fetchAllAprs(): Promise<AprEntry[]> {
@@ -356,17 +360,21 @@ async function fetchAllAprs(): Promise<AprEntry[]> {
 }
 
 export async function GET() {
-  const now = Date.now()
-  if (cache && now - cache.fetchedAt < CACHE_TTL)
-    return NextResponse.json(cache.data, { headers: { 'X-Cache': 'HIT', 'Cache-Control': 'public, max-age=60' } })
+  const cached = await kvGet<AprEntry[]>('best-aprs', SOFT_TTL)
+
+  if (cached.data && cached.fresh) {
+    return NextResponse.json(cached.data, { headers: { 'X-Cache': 'HIT', 'Cache-Control': 'public, max-age=60' } })
+  }
+
   if (!inflight) inflight = fetchAllAprs().finally(() => { inflight = null })
+
   try {
     const data = await inflight
-    cache = { data, fetchedAt: now }
+    await kvSet('best-aprs', data, HARD_TTL)
     return NextResponse.json(data, { headers: { 'X-Cache': 'MISS', 'Cache-Control': 'public, max-age=60' } })
   } catch (e) {
     console.error('[best-aprs] Fatal:', e)
-    if (cache) return NextResponse.json(cache.data, { headers: { 'X-Cache': 'STALE' } })
+    if (cached.data) return NextResponse.json(cached.data, { headers: { 'X-Cache': 'STALE' } })
     return NextResponse.json([], { status: 502 })
   }
 }
