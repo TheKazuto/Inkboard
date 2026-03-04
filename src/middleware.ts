@@ -1,26 +1,83 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-// Fix #15 (BAIXO): Simple in-memory rate limiter for API routes.
-// Runs on the Edge runtime — no extra dependency needed.
-// Limits: 60 requests / minute per IP across all /api/ routes.
-// Stricter limits for expensive routes (approvals-logs, nfts, defi).
-//
-// NOTE: This in-memory store resets on cold start. On Cloudflare Workers,
-// each request may run in a different isolate, so this rate limiter is
-// best-effort. For stricter enforcement, use Cloudflare's native WAF
-// Rate Limiting rules in the dashboard (Security → WAF → Rate limiting).
+// ─── CSP ─────────────────────────────────────────────────────────────────────
+// Strict Content-Security-Policy for all pages EXCEPT /api/ad (ad iframe).
+// Moved here from next.config.js headers() so we can exclude /api/ad.
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com data:",
+  "img-src 'self' data: blob: https:",
+  [
+    "connect-src 'self'",
+    "https://rpc-gel.inkonchain.com",
+    "https://rpc-qnd.inkonchain.com",
+    "https://api.coingecko.com",
+    "https://pro-api.coingecko.com",
+    "https://api.geckoterminal.com",
+    "https://tokens.coingecko.com",
+    "https://api.etherscan.io",
+    "https://api-v2.rubic.exchange",
+    "https://api-mainnet.magiceden.dev",
+    "https://open.er-api.com",
+    "https://api.alternative.me",
+    "https://api.lagoon.finance",
+    "https://app.renzoprotocol.com",
+    "wss://relay.walletconnect.com",
+    "wss://relay.walletconnect.org",
+    "https://relay.walletconnect.com",
+    "https://relay.walletconnect.org",
+    "https://api.web3modal.com",
+    "https://pulse.walletconnect.org",
+    "https://rainbowkit.com",
+    "https://ethereum-rpc.publicnode.com",
+    "https://bsc-rpc.publicnode.com",
+    "https://polygon-rpc.com",
+    "https://arb1.arbitrum.io",
+    "https://mainnet.optimism.io",
+    "https://mainnet.base.org",
+    "https://api.avax.network",
+    "https://api.web3modal.org",
+    "https://api-core.curve.finance",
+    "https://inkyswap.com",
+    "https://yields.llama.fi",
+    "https://ink.drpc.org",
+    "https://icons.llamao.fi",
+    "https://li.quest",
+    "https://ipfs.io",
+    "https://gateway.pinata.cloud",
+    "https://api.opensea.io",
+    "https://explorer.inkonchain.com",
+  ].join(' '),
+  "frame-src 'self' https://*.effectivegatecpm.com https://*.effectiveperformancenetwork.com https://*.adsterra.com https://*.adstera.com",
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "upgrade-insecure-requests",
+].join('; ')
 
+const SECURITY_HEADERS: [string, string][] = [
+  ['Content-Security-Policy', CSP],
+  ['Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload'],
+  ['X-Frame-Options', 'SAMEORIGIN'],
+  ['X-Content-Type-Options', 'nosniff'],
+  ['Referrer-Policy', 'strict-origin-when-cross-origin'],
+  ['Permissions-Policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=()'],
+  ['X-XSS-Protection', '0'],
+  ['X-Permitted-Cross-Domain-Policies', 'none'],
+]
+
+// ─── Rate limiter ────────────────────────────────────────────────────────────
 interface RateEntry { count: number; resetAt: number }
 const store = new Map<string, RateEntry>()
 
-const WINDOW_MS = 60_000  // 1-minute sliding window
+const WINDOW_MS = 60_000
 
-// Per-route limits (requests per window per IP)
 const ROUTE_LIMITS: Record<string, number> = {
-  '/api/approvals-logs': 10,  // Blockscout API — conservative
-  '/api/nfts':           10,  // OpenSea + Blockscout — strict
-  '/api/defi':           15,  // many RPC calls per request
-  '/api/best-aprs':      12,  // calls many external APIs
+  '/api/approvals-logs': 10,
+  '/api/nfts':           10,
+  '/api/defi':           15,
+  '/api/best-aprs':      12,
   '/api/transactions':   20,
   '/api/portfolio-history': 20,
   '/api/token-exposure': 30,
@@ -42,22 +99,26 @@ function getClientIp(req: NextRequest): string {
   )
 }
 
+// ─── Middleware ───────────────────────────────────────────────────────────────
+
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
 
-  // ── /ad.html: serve without restrictive CSP (ad.html has its own via meta tag)
-  if (pathname === '/ad.html') {
-    const res = NextResponse.next()
-    res.headers.delete('Content-Security-Policy')
-    res.headers.delete('X-Frame-Options')
-    return res
-  }
-
-  // Only rate-limit API routes
-  if (!pathname.startsWith('/api/')) {
+  // ── /api/ad: ad iframe — NO strict CSP, NO rate limiting
+  if (pathname === '/api/ad') {
     return NextResponse.next()
   }
 
+  // ── Non-API routes: apply security headers only
+  if (!pathname.startsWith('/api/')) {
+    const res = NextResponse.next()
+    for (const [key, value] of SECURITY_HEADERS) {
+      res.headers.set(key, value)
+    }
+    return res
+  }
+
+  // ── API routes: rate limiting + security headers
   const ip    = getClientIp(req)
   const key   = `${ip}::${pathname}`
   const now   = Date.now()
@@ -66,7 +127,9 @@ export function middleware(req: NextRequest) {
   const entry = store.get(key)
   if (!entry || now > entry.resetAt) {
     store.set(key, { count: 1, resetAt: now + WINDOW_MS })
-    return addRateLimitHeaders(NextResponse.next(), 1, limit, now + WINDOW_MS)
+    const res = addRateLimitHeaders(NextResponse.next(), 1, limit, now + WINDOW_MS)
+    for (const [k, v] of SECURITY_HEADERS) res.headers.set(k, v)
+    return res
   }
 
   entry.count++
@@ -87,7 +150,9 @@ export function middleware(req: NextRequest) {
     )
   }
 
-  return addRateLimitHeaders(NextResponse.next(), entry.count, limit, entry.resetAt)
+  const res = addRateLimitHeaders(NextResponse.next(), entry.count, limit, entry.resetAt)
+  for (const [k, v] of SECURITY_HEADERS) res.headers.set(k, v)
+  return res
 }
 
 function addRateLimitHeaders(
@@ -103,5 +168,5 @@ function addRateLimitHeaders(
 }
 
 export const config = {
-  matcher: ['/api/:path*', '/ad.html'],
+  matcher: ['/((?!_next/static|_next/image|favicon\\.ico|apple-touch-icon\\.png|ink-logo\\.jpg|inkboard-logo\\.png|ads\\.txt).*)',],
 }
