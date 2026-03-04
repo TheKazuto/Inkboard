@@ -180,24 +180,15 @@ async function fetchGeckoPools(): Promise<GeckoPool[]> {
   const out: GeckoPool[] = [], seen = new Set<string>()
   const FEE_STABLE = 0.0001, FEE_DEFAULT = 0.003
 
-  // Fetch SEQUENTIALLY — 2 concurrent GeckoTerminal requests trigger 429 rate limit
-  const results: { dexId: string; pools: any[]; included: any[] }[] = []
-  for (const dexId of VELO_DEX_IDS) {
+  const results = await Promise.all(VELO_DEX_IDS.map(async (dexId) => {
     try {
       const url = `${GECKO_BASE}/networks/ink/dexes/${dexId}/pools?page=1&sort=h24_volume_usd_desc&include=base_token,quote_token`
       const res = await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { Accept: 'application/json' } })
-      if (!res.ok) {
-        console.error(`[best-aprs] GeckoTerminal ${dexId} HTTP ${res.status}`)
-        results.push({ dexId, pools: [], included: [] })
-        continue
-      }
+      if (!res.ok) return { dexId, pools: [], included: [] }
       const json = await res.json()
-      results.push({ dexId, pools: json.data ?? [], included: json.included ?? [] })
-    } catch (e) {
-      console.error(`[best-aprs] GeckoTerminal ${dexId} error:`, e)
-      results.push({ dexId, pools: [], included: [] })
-    }
-  }
+      return { dexId, pools: json.data ?? [], included: json.included ?? [] }
+    } catch { return { dexId, pools: [], included: [] } }
+  }))
 
   const tokenSymbols = new Map<string, string>()
   for (const { included } of results)
@@ -234,21 +225,14 @@ async function fetchGeckoPools(): Promise<GeckoPool[]> {
 
 // ─── Combined Velodrome: on-chain emissions + GeckoTerminal TVL/fees ────────
 async function fetchVelodromeData(): Promise<AprEntry[]> {
-  // Fetch pools FIRST (critical path) — avoids 3 concurrent GeckoTerminal
-  // requests that trigger rate limiting on cold start
-  const geckoPools = await fetchGeckoPools().catch(e => {
-    console.error('[best-aprs] fetchGeckoPools failed:', e)
-    return [] as GeckoPool[]
-  })
+  const [priceResult, poolsResult] = await Promise.allSettled([fetchVeloPrice(), fetchGeckoPools()])
+  const veloPrice  = priceResult.status  === 'fulfilled' ? priceResult.value  : 0
+  const geckoPools = poolsResult.status === 'fulfilled' ? poolsResult.value : []
   if (geckoPools.length === 0) return []
 
-  // Price + emissions in parallel (GeckoTerminal/CoinGecko + RPC — different APIs)
-  const [priceResult, emissionsResult] = await Promise.allSettled([
-    fetchVeloPrice(),
-    fetchGaugeEmissions(geckoPools.map(g => g.address)),
-  ])
-  const veloPrice = priceResult.status === 'fulfilled' ? priceResult.value : 0
-  const emissions = emissionsResult.status === 'fulfilled' ? emissionsResult.value : new Map<string, number>()
+  let emissions = new Map<string, number>()
+  try { emissions = await fetchGaugeEmissions(geckoPools.map(g => g.address)) }
+  catch (e) { console.error('[best-aprs] Gauge emissions failed:', e) }
 
 
   const out: AprEntry[] = []
@@ -319,9 +303,14 @@ async function fetchInkySwapData(): Promise<AprEntry[]> {
   return out
 }
 
-// ─── DefiLlama (Tydro + Curve on Ink) ───────────────────────────────────────
-// Only fetches Tydro and Curve — Velodrome and InkySwap are handled directly above
-const LLAMA_SLUGS = new Set(['tydro', 'curve-dex'])
+// ─── DefiLlama (ALL Ink protocols including Velodrome) ──────────────────────
+// DefiLlama is the PRIMARY source for Velodrome because GeckoTerminal
+// rate-limits on cold start (3 concurrent requests → 429).
+// When GeckoTerminal succeeds, its data replaces DefiLlama's (more granular).
+const LLAMA_SLUGS = new Set([
+  'tydro', 'curve-dex',
+  'velodrome-v2', 'velodrome-v3', 'velodrome',
+])
 
 async function fetchDefiLlama(): Promise<AprEntry[]> {
   const out: AprEntry[] = []
@@ -363,14 +352,28 @@ const HARD_TTL = 10 * 60         // 10 minutes (seconds) — KV auto-deletes
 let inflight: Promise<AprEntry[]> | null = null
 
 async function fetchAllAprs(): Promise<AprEntry[]> {
+  // DefiLlama + InkySwap are reliable — always fetch them.
+  // GeckoTerminal Velodrome is optional enrichment (rate-limits on cold start).
   const [v, i, l] = await Promise.allSettled([fetchVelodromeData(), fetchInkySwapData(), fetchDefiLlama()])
-  const velo  = v.status === 'fulfilled' ? v.value : []
-  const inky  = i.status === 'fulfilled' ? i.value : []
-  const llama = l.status === 'fulfilled' ? l.value : []
-  if (v.status === 'rejected') console.error('[best-aprs] Velodrome failed:', v.reason)
+  const geckoVelo = v.status === 'fulfilled' ? v.value : []
+  const inky      = i.status === 'fulfilled' ? i.value : []
+  const llama     = l.status === 'fulfilled' ? l.value : []
+  if (v.status === 'rejected') console.error('[best-aprs] Velodrome/Gecko failed:', v.reason)
   if (i.status === 'rejected') console.error('[best-aprs] InkySwap failed:', i.reason)
   if (l.status === 'rejected') console.error('[best-aprs] DefiLlama failed:', l.reason)
-  const all = [...velo, ...inky, ...llama]
+
+  // Split DefiLlama results: Velodrome entries vs others (Tydro, Curve)
+  const llamaVelo  = llama.filter(e => e.protocol.startsWith('Velodrome'))
+  const llamaOther = llama.filter(e => !e.protocol.startsWith('Velodrome'))
+
+  // Use GeckoTerminal Velodrome data if available (more granular per-pool),
+  // otherwise fall back to DefiLlama Velodrome data (always available)
+  const veloData = geckoVelo.length > 0 ? geckoVelo : llamaVelo
+  if (geckoVelo.length === 0 && llamaVelo.length > 0) {
+    console.warn(`[best-aprs] GeckoTerminal empty, using ${llamaVelo.length} DefiLlama Velodrome pools`)
+  }
+
+  const all = [...veloData, ...inky, ...llamaOther]
   all.sort((a, b) => b.apr - a.apr || b.tvl - a.tvl)
   return all
 }
@@ -386,24 +389,8 @@ export async function GET() {
 
   try {
     const data = await inflight
-    const hasVelo = data.some(e => e.protocol.startsWith('Velodrome'))
-
-    if (hasVelo || data.length > 10) {
-      // Complete result — cache normally
-      await kvSet('best-aprs', data, HARD_TTL)
-      return NextResponse.json(data, { headers: { 'X-Cache': 'MISS', 'Cache-Control': 'public, max-age=60' } })
-    }
-
-    // Partial result (Velodrome missing) — short 15s cache so we retry quickly
-    await kvSet('best-aprs', data, 30)
-    console.warn(`[best-aprs] Partial: ${data.length} entries, no Velodrome — short cache`)
-
-    // Prefer stale complete data over fresh partial data
-    if (cached.data && cached.data.some(e => e.protocol.startsWith('Velodrome'))) {
-      return NextResponse.json(cached.data, { headers: { 'X-Cache': 'STALE-FULL', 'Cache-Control': 'public, max-age=15' } })
-    }
-
-    return NextResponse.json(data, { headers: { 'X-Cache': 'PARTIAL', 'Cache-Control': 'public, max-age=15' } })
+    await kvSet('best-aprs', data, HARD_TTL)
+    return NextResponse.json(data, { headers: { 'X-Cache': 'MISS', 'Cache-Control': 'public, max-age=60' } })
   } catch (e) {
     console.error('[best-aprs] Fatal:', e)
     if (cached.data) return NextResponse.json(cached.data, { headers: { 'X-Cache': 'STALE' } })
