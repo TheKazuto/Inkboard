@@ -3,50 +3,40 @@
 import { useEffect, useRef } from 'react'
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
-// Set your AdSense publisher ID in .env.local:
-//   NEXT_PUBLIC_ADSENSE_CLIENT=ca-pub-XXXXXXXXXXXXXXXX
-// Set the ad slot ID (from AdSense → Ads → By ad unit):
-//   NEXT_PUBLIC_ADSENSE_SLOT_DASHBOARD=XXXXXXXXXX
-const ADSENSE_CLIENT = process.env.NEXT_PUBLIC_ADSENSE_CLIENT ?? ''
-const ADSENSE_SLOT   = process.env.NEXT_PUBLIC_ADSENSE_SLOT_DASHBOARD ?? ''
-const IS_CONFIGURED  = !!ADSENSE_CLIENT && !!ADSENSE_SLOT
+// Adsterra ad unit script URL (provided by Adsterra dashboard)
+const ADSTERRA_SRC =
+  'https://pl28844904.effectivegatecpm.com/68/ce/1d/68ce1d5a90edc273336da9c93f8a8bef.js'
 
 // ─── COMPONENT ────────────────────────────────────────────────────────────────
 export default function AdBanner({ className = '' }: { className?: string }) {
-  const ref = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const loadedRef    = useRef(false)
 
   useEffect(() => {
-    if (!IS_CONFIGURED) return
-    try {
-      // Push ad after mount — required by AdSense
-      ;(window as any).adsbygoogle = (window as any).adsbygoogle || []
-      ;(window as any).adsbygoogle.push({})
-    } catch { /* ignore */ }
+    if (loadedRef.current || !containerRef.current) return
+    loadedRef.current = true
+
+    const script = document.createElement('script')
+    script.src   = ADSTERRA_SRC
+    script.async = true
+    script.type  = 'text/javascript'
+
+    containerRef.current.appendChild(script)
+
+    return () => {
+      // Cleanup on unmount — remove injected ad elements
+      if (containerRef.current) {
+        containerRef.current.innerHTML = ''
+      }
+      loadedRef.current = false
+    }
   }, [])
 
-  // ── Not configured yet — show a placeholder ───────────────────────────────
-  if (!IS_CONFIGURED) {
-    return (
-      <div
-        className={`flex flex-col items-center justify-center rounded-xl border border-dashed border-violet-200 bg-violet-50/40 text-center p-4 ${className}`}
-        style={{ minHeight: 80 }}
-      >
-        <p className="text-xs text-violet-400 font-medium">Ads area</p>
-      </div>
-    )
-  }
-
-  // ── AdSense responsive ad unit ────────────────────────────────────────────
   return (
-    <div ref={ref} className={`overflow-hidden ${className}`} style={{ minHeight: 80 }}>
-      <ins
-        className="adsbygoogle"
-        style={{ display: 'block', width: '100%', height: '100%' }}
-        data-ad-client={ADSENSE_CLIENT}
-        data-ad-slot={ADSENSE_SLOT}
-        data-ad-format="auto"
-        data-full-width-responsive="true"
-      />
-    </div>
+    <div
+      ref={containerRef}
+      className={`overflow-hidden flex items-center justify-center ${className}`}
+      style={{ minHeight: 80 }}
+    />
   )
 }

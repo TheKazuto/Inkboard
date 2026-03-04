@@ -13,10 +13,10 @@ if (process.env.NODE_ENV === "development") {
 const CSP = [
   "default-src 'self'",
 
-  // Scripts: self + AdSense + unsafe-inline (required by Next.js 14 SSR hydration scripts)
+  // Scripts: self + Adsterra + unsafe-inline (required by Next.js 14 SSR hydration scripts)
   // unsafe-eval remains REMOVED — prevents eval()/Function() injection attacks.
   // Note: full removal of unsafe-inline requires nonce-based CSP (future improvement).
-  "script-src 'self' 'unsafe-inline' https://pagead2.googlesyndication.com https://adservice.google.com",
+  "script-src 'self' 'unsafe-inline' https://pl28844904.effectivegatecpm.com https://*.effectivegatecpm.com",
 
   // Styles: unsafe-inline is OK here — it cannot cause script execution
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
@@ -59,9 +59,8 @@ const CSP = [
     "https://mainnet.optimism.io",
     "https://mainnet.base.org",
     "https://api.avax.network",
-    "https://pagead2.googlesyndication.com",
-    "https://adservice.google.com",
-    "https://googleads.g.doubleclick.net",
+    "https://pl28844904.effectivegatecpm.com",
+    "https://*.effectivegatecpm.com",
     "https://api.web3modal.org",
     "https://api-core.curve.finance",
     "https://inkyswap.com",
@@ -75,8 +74,8 @@ const CSP = [
     "https://explorer.inkonchain.com",
   ].join(' '),
 
-  // Frames: AdSense only
-  "frame-src https://googleads.g.doubleclick.net https://tpc.googlesyndication.com",
+  // Frames: Adsterra ad iframes
+  "frame-src https://*.effectivegatecpm.com https://*.adsterra.com",
 
   // Workers
   "worker-src 'self' blob:",

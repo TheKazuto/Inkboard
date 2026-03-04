@@ -1,11 +1,8 @@
 import type { Metadata } from 'next'
-import Script from 'next/script'
 import './globals.css'
 import Navbar from '@/components/Navbar'
 import BottomBar from '@/components/BottomBar'
 import Providers from '@/components/Providers'
-
-const ADSENSE_CLIENT = process.env.NEXT_PUBLIC_ADSENSE_CLIENT ?? ''
 
 export const metadata: Metadata = {
   title: 'InkBoard — Your Ink DeFi Dashboard',
@@ -30,14 +27,6 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="min-h-screen" style={{ background: 'var(--ink-bg)' }}>
-        {ADSENSE_CLIENT && (
-          <Script
-            async
-            src={`https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${ADSENSE_CLIENT}`}
-            crossOrigin="anonymous"
-            strategy="lazyOnload"
-          />
-        )}
         <Providers>
           <Navbar />
           <main className="page-content pt-16">
