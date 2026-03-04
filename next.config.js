@@ -16,7 +16,7 @@ const CSP = [
   // Scripts: self + Adsterra + unsafe-inline (required by Next.js 14 SSR hydration scripts)
   // unsafe-eval remains REMOVED — prevents eval()/Function() injection attacks.
   // Note: full removal of unsafe-inline requires nonce-based CSP (future improvement).
-  "script-src 'self' 'unsafe-inline' https://pl28844904.effectivegatecpm.com https://*.effectivegatecpm.com",
+  "script-src 'self' 'unsafe-inline' https://*.effectivegatecpm.com https://*.effectiveperformancenetwork.com https://*.adsterra.com https://*.adstera.com",
 
   // Styles: unsafe-inline is OK here — it cannot cause script execution
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
@@ -59,8 +59,10 @@ const CSP = [
     "https://mainnet.optimism.io",
     "https://mainnet.base.org",
     "https://api.avax.network",
-    "https://pl28844904.effectivegatecpm.com",
     "https://*.effectivegatecpm.com",
+    "https://*.effectiveperformancenetwork.com",
+    "https://*.adsterra.com",
+    "https://*.adstera.com",
     "https://api.web3modal.org",
     "https://api-core.curve.finance",
     "https://inkyswap.com",
@@ -75,7 +77,7 @@ const CSP = [
   ].join(' '),
 
   // Frames: Adsterra ad iframes
-  "frame-src https://*.effectivegatecpm.com https://*.adsterra.com",
+  "frame-src https://*.effectivegatecpm.com https://*.effectiveperformancenetwork.com https://*.adsterra.com https://*.adstera.com",
 
   // Workers
   "worker-src 'self' blob:",

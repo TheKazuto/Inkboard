@@ -1,4 +1,5 @@
 import type { Metadata } from 'next'
+import Script from 'next/script'
 import './globals.css'
 import Navbar from '@/components/Navbar'
 import BottomBar from '@/components/BottomBar'
@@ -34,6 +35,11 @@ export default function RootLayout({
           </main>
           <BottomBar />
         </Providers>
+        {/* Adsterra Social Bar — loads once, self-renders as floating overlay */}
+        <Script
+          src="https://pl28844904.effectivegatecpm.com/68/ce/1d/68ce1d5a90edc273336da9c93f8a8bef.js"
+          strategy="lazyOnload"
+        />
       </body>
     </html>
   )
