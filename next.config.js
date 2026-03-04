@@ -68,6 +68,11 @@ const CSP = [
     "https://yields.llama.fi",
     "https://ink.drpc.org",
     "https://icons.llamao.fi",
+    "https://li.quest",
+    "https://ipfs.io",
+    "https://gateway.pinata.cloud",
+    "https://api.opensea.io",
+    "https://explorer.inkonchain.com",
   ].join(' '),
 
   // Frames: AdSense only

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { encodeFunctionData, decodeFunctionResult, type Abi } from 'viem'
+import { INK_RPC } from '@/lib/ink'
 
 export const revalidate = 0
 
@@ -49,7 +50,6 @@ function inferType(project: string, poolMeta: string | null): 'pool' | 'vault' |
 
 // ─── Velodrome on Ink (chain 57073) ─────────────────────────────────────────
 const VOTER_INK    = '0x97cDBCe21B6fd0585d29E539B1B99dAd328a1123' as const
-const INK_RPC      = 'https://rpc-gel.inkonchain.com'
 const INK_RPC_ALT  = 'https://ink.drpc.org'
 const VELO_URL     = 'https://velodrome.finance/liquidity?chain=57073'
 const GECKO_BASE   = 'https://api.geckoterminal.com/api/v2'

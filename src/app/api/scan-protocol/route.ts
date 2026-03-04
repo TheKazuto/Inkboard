@@ -36,15 +36,33 @@ const DEFI_KEYWORDS = [
   'factory', 'router', 'pair', 'pairs', 'quote', 'route', 'routes',
 ]
 
+// ─── SSRF protection ─────────────────────────────────────────────────────────
+const PRIVATE_IP_RE = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.|0\.|::1|fc00:|fd)/
+const BLOCKED_HOSTNAMES = ['localhost', 'metadata.google.internal', 'metadata.google']
+
+function isSafeUrl(url: string): boolean {
+  try {
+    const u = new URL(url)
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return false
+    if (PRIVATE_IP_RE.test(u.hostname)) return false
+    if (BLOCKED_HOSTNAMES.some(h => u.hostname === h || u.hostname.endsWith('.' + h))) return false
+    if (u.hostname.endsWith('.local') || u.hostname.endsWith('.internal')) return false
+    return true
+  } catch { return false }
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function safeFetch(url: string, opts?: RequestInit): Promise<{ ok: boolean; status: number; text: string; error?: string }> {
+  if (!isSafeUrl(url)) {
+    return { ok: false, status: 0, text: '', error: 'Blocked: unsafe URL' }
+  }
   try {
     const res = await fetch(url, {
       signal: AbortSignal.timeout(12_000),
       cache: 'no-store',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Inkboard-Scanner/1.0 (+https://inkboard.pro)',
         'Accept': '*/*',
       },
       ...opts,
@@ -300,6 +318,10 @@ export async function GET(req: Request) {
   let targetUrl: URL
   try { targetUrl = new URL(target) } catch {
     return NextResponse.json({ error: 'Invalid URL' }, { status: 400 })
+  }
+
+  if (!isSafeUrl(target)) {
+    return NextResponse.json({ error: 'URL blocked: only public HTTPS URLs are allowed' }, { status: 400 })
   }
 
   const log: string[] = []

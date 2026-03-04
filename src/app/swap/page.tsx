@@ -731,6 +731,11 @@ export default function SwapPage() {
       // FIX #1: Use precise BigInt for approval amount
       // FIX #2: Wait for approval confirmation before swap
       if (quote.estimate.approvalAddress && fromToken.address !== NATIVE) {
+        // Validate approvalAddress is a valid Ethereum address
+        const approvalAddr = quote.estimate.approvalAddress
+        if (!/^0x[0-9a-fA-F]{40}$/.test(approvalAddr)) {
+          throw new Error('Invalid approval address received from quote')
+        }
         setTxStatus('approving')
         const approveAmount = humanToWei(amount, fromToken.decimals)
         // Add 0.5% buffer to approval to cover rounding
@@ -739,7 +744,7 @@ export default function SwapPage() {
           to: fromToken.address as `0x${string}`,
           data: encodeFunctionData({
             abi: ERC20_APPROVE_ABI, functionName: 'approve',
-            args: [quote.estimate.approvalAddress as `0x${string}`, approveWithBuffer],
+            args: [approvalAddr as `0x${string}`, approveWithBuffer],
           }),
         })
         setApprovalHash(appHash)
@@ -779,6 +784,10 @@ export default function SwapPage() {
       }
 
       setTxStatus('swapping')
+      // Validate transaction target address
+      if (!txReq.to || !/^0x[0-9a-fA-F]{40}$/.test(txReq.to)) {
+        throw new Error('Invalid transaction target address from quote')
+      }
       const hash = await sendTransactionAsync({
         to:    txReq.to as `0x${string}`,
         data:  txReq.data as `0x${string}`,

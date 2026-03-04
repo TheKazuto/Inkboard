@@ -192,12 +192,47 @@ export async function GET(req: NextRequest) {
       const result = await fetchNFTsViaOpenSea(address, openSeaKey, ethPrice)
       return NextResponse.json(result)
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      console.error('[nfts] opensea error:', msg)
-      return NextResponse.json({ debug: 'opensea_failed', error: msg, fallback: 'blockscout' })
+      console.error('[nfts] opensea error:', e instanceof Error ? e.message : e)
+      // Fall through to Blockscout fallback
     }
   }
 
-  // No OpenSea key — return debug info
-  return NextResponse.json({ debug: 'no_api_key', hint: 'OPENSEA_API_KEY not found in env' })
+  // ── PATH 2: Blockscout + on-chain fallback ──────────────────────────────────
+  try {
+    const candidates = await discoverNFTsViaBlockscout(address)
+    if (candidates.length === 0) {
+      return NextResponse.json({ nfts: [], nftValue: 0, total: 0 })
+    }
+
+    const owned = await verifyOwnership(candidates, address)
+    if (owned.length === 0) {
+      return NextResponse.json({ nfts: [], nftValue: 0, total: 0 })
+    }
+
+    const { cMeta, uriRes } = await fetchOnChainMeta(owned)
+
+    const nfts = await Promise.all(owned.map(async ({ contract, tokenId }, i) => {
+      const cm = cMeta[contract] ?? { name: '', symbol: '' }
+      const rawUri = decodeString(uriRes[i]?.result ?? '')
+      const meta = rawUri ? await fetchTokenMeta(rawUri) : null
+
+      return {
+        id:         `${contract}_${tokenId}`,
+        contract,
+        tokenId:    tokenId.toString(),
+        collection: cm.name || `${contract.slice(0, 6)}...${contract.slice(-4)}`,
+        symbol:     cm.symbol,
+        name:       meta?.name ?? `#${tokenId}`,
+        image:      sanitizeImage(meta?.image ?? meta?.image_url ?? null),
+        floorETH:   0,
+        floorUSD:   0,
+        openSeaUrl: `https://opensea.io/assets/${OPENSEA_CHAIN}/${contract}/${tokenId}`,
+      }
+    }))
+
+    return NextResponse.json({ nfts, nftValue: 0, total: nfts.length })
+  } catch (e) {
+    console.error('[nfts] blockscout fallback error:', e instanceof Error ? e.message : e)
+    return NextResponse.json({ nfts: [], nftValue: 0, total: 0 })
+  }
 }
