@@ -22,6 +22,12 @@ import { getCloudflareContext } from '@opennextjs/cloudflare'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+/** Minimal KV interface — avoids depending on @cloudflare/workers-types */
+interface KV {
+  get(key: string, type: 'text'): Promise<string | null>
+  put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<void>
+}
+
 interface Envelope<T> {
   d: T          // data
   t: number     // fetchedAt (epoch ms)
@@ -34,10 +40,10 @@ export interface CacheResult<T> {
 
 // ─── KV binding accessor ──────────────────────────────────────────────────────
 
-async function getKV(): Promise<KVNamespace | null> {
+async function getKV(): Promise<KV | null> {
   try {
     const { env } = await getCloudflareContext()
-    const kv = (env as Record<string, unknown>).CACHE_KV as KVNamespace | undefined
+    const kv = (env as Record<string, unknown>).CACHE_KV as KV | undefined
     return kv ?? null
   } catch {
     return null
