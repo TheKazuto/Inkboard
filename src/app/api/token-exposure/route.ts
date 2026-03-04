@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { KNOWN_TOKENS, rpcBatch, buildBalanceOfCall } from '@/lib/ink'
+import { getAllPrices } from '@/lib/priceService'
+import { kvGet, kvSet } from '@/lib/kvCache'
 
 export const revalidate = 0
 
@@ -40,35 +42,51 @@ export async function GET(req: NextRequest) {
       return { ...token, balance }
     })
 
-    // ── 3. Fetch prices + images from CoinGecko (free, no key) ────────────────
+    // ── 3. Prices from priceService + images from KV cache ─────────────────────
     const coinIds = [
       'ethereum', // ETH native
       ...KNOWN_TOKENS.map((t) => t.coingeckoId),
-    ].join(',')
+    ]
 
     let prices: Record<string, number> = {}
     let images: Record<string, string> = {}
+
+    // Prices: from shared priceService (no extra CoinGecko call)
     try {
-      // /coins/markets returns both current_price and image in a single call —
-      // no need for a separate /simple/price request (Fix #6).
-      const cgHeaders: Record<string, string> = { 'Accept': 'application/json' }
-      const cgKey = process.env.COINGECKO_API_KEY
-      if (cgKey) cgHeaders['x-cg-demo-api-key'] = cgKey
-      const marketRes = await fetch(
-        `https://api.coingecko.com/api/v3/coins/markets?ids=${coinIds}&vs_currency=usd&per_page=20`,
-        { headers: cgHeaders, next: { revalidate: 60 } }
-      )
-      const marketData = await marketRes.json()
-      if (Array.isArray(marketData)) {
-        for (const coin of marketData) {
-          if (coin.id) {
-            prices[coin.id] = coin.current_price ?? 0
-            if (coin.image) images[coin.id] = coin.image
-          }
-        }
+      const allPrices = await getAllPrices()
+      for (const id of coinIds) {
+        if (allPrices[id]?.usd) prices[id] = allPrices[id].usd
       }
-    } catch {
-      // fallback prices if CoinGecko fails
+    } catch { /* fallback below */ }
+
+    // Images: cached separately with 1h TTL (they rarely change)
+    const IMG_SOFT_TTL = 60 * 60 * 1000  // 1 hour
+    const IMG_HARD_TTL = 4 * 60 * 60     // 4 hours
+    const imgCached = await kvGet<Record<string, string>>('token-images', IMG_SOFT_TTL)
+    if (imgCached.data) {
+      images = imgCached.data
+    } else {
+      // Fetch images from /coins/markets (only when image cache is cold)
+      try {
+        const cgHeaders: Record<string, string> = { 'Accept': 'application/json' }
+        const cgKey = process.env.COINGECKO_API_KEY
+        if (cgKey) cgHeaders['x-cg-demo-api-key'] = cgKey
+        const marketRes = await fetch(
+          `https://api.coingecko.com/api/v3/coins/markets?ids=${coinIds.join(',')}&vs_currency=usd&per_page=20`,
+          { headers: cgHeaders, next: { revalidate: 3600 } }
+        )
+        const marketData = await marketRes.json()
+        if (Array.isArray(marketData)) {
+          for (const coin of marketData) {
+            if (coin.id && coin.image) images[coin.id] = coin.image
+          }
+          await kvSet('token-images', images, IMG_HARD_TTL)
+        }
+      } catch { /* use whatever we have */ }
+    }
+
+    // Fallback prices if priceService returned nothing
+    if (!prices['ethereum']) {
       prices = {
         ethereum: 2000,
         'usd-coin': 1.0,

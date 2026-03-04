@@ -143,9 +143,9 @@ export const KNOWN_TOKENS: KnownToken[] = [
   },
 ]
 
-// ─── ETH price (shared, KV-cached) ────────────────────────────────────────────
+// ─── ETH price (delegates to centralized priceService) ────────────────────────
 
-import { kvGet, kvSet } from '@/lib/kvCache'
+import { getEthPriceFromService } from '@/lib/priceService'
 
 export interface EthPriceData {
   price:        number
@@ -153,52 +153,13 @@ export interface EthPriceData {
   changeAmount: number
 }
 
-const ETH_PRICE_SOFT_TTL = 60_000  // 60 seconds (ms) — consider fresh
-const ETH_PRICE_HARD_TTL = 5 * 60  // 5 minutes (seconds) — KV auto-deletes
-
-// Inflight dedup stays in-memory — prevents concurrent CoinGecko requests
-// within the same isolate
-let ethPriceInflight: Promise<EthPriceData> | null = null
-
 /**
- * Fetch the current ETH/USD price + 24h change from CoinGecko.
- * Results are cached in KV so all Workers isolates share one upstream call.
- * In-flight deduplication prevents parallel CoinGecko requests within the same isolate.
+ * Fetch the current ETH/USD price + 24h change.
+ * Delegates to the centralized priceService which batches ALL CoinGecko
+ * price requests into a single call, KV-cached for 60s.
  */
 export async function getEthPriceData(): Promise<EthPriceData> {
-  const cached = await kvGet<EthPriceData>('eth-price', ETH_PRICE_SOFT_TTL)
-  if (cached.data && cached.fresh) {
-    return cached.data
-  }
-  if (ethPriceInflight) return ethPriceInflight
-
-  ethPriceInflight = (async () => {
-    try {
-      const apiKey = process.env.COINGECKO_API_KEY
-      const headers: Record<string, string> = { 'Accept': 'application/json' }
-      if (apiKey) headers['x-cg-demo-api-key'] = apiKey
-
-      const res = await fetch(
-        'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd&include_24hr_change=true',
-        { headers, next: { revalidate: 60 } },
-      )
-      const d         = await res.json()
-      const price     = (d?.ethereum?.usd as number) ?? 0
-      const change24h = (d?.ethereum?.usd_24h_change as number) ?? 0
-      const prevPrice = price / (1 + change24h / 100)
-      const data: EthPriceData = { price, change24h, changeAmount: price - prevPrice }
-      await kvSet('eth-price', data, ETH_PRICE_HARD_TTL)
-      return data
-    } catch {
-      // Return stale KV data on error
-      if (cached.data) return cached.data
-      return { price: 0, change24h: 0, changeAmount: 0 }
-    } finally {
-      ethPriceInflight = null
-    }
-  })()
-
-  return ethPriceInflight
+  return getEthPriceFromService()
 }
 
 /** Convenience wrapper — returns just the price number. */

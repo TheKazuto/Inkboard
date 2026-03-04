@@ -43,25 +43,19 @@ const STABLES = new Set([
   'frxUSD', 'sfrxUSD', 'BUSD', 'TUSD', 'LUSD',
 ])
 
+import { getAllPrices } from '@/lib/priceService'
+
 async function getTokenPricesUSD(symbols: string[]): Promise<Record<string, number>> {
   const prices: Record<string, number> = {}
   for (const s of symbols) if (STABLES.has(s)) prices[s] = 1
   const toFetch = symbols.filter(s => prices[s] === undefined)
   if (!toFetch.length) return prices
-  const ids = [...new Set(toFetch.map(s => COINGECKO_IDS[s]).filter(Boolean))]
-  if (!ids.length) return prices
   try {
-    const cgHeaders: Record<string, string> = { 'Accept': 'application/json' }
-    const cgKey = process.env.COINGECKO_API_KEY
-    if (cgKey) cgHeaders['x-cg-demo-api-key'] = cgKey
-    const res = await fetch(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${ids.join(',')}&vs_currencies=usd`,
-      { headers: cgHeaders, next: { revalidate: 60 } },
-    )
-    const data = await res.json()
+    // Use centralized priceService (shared KV cache, no extra CoinGecko call)
+    const allPrices = await getAllPrices()
     for (const sym of toFetch) {
       const id = COINGECKO_IDS[sym]
-      if (id && data[id]?.usd) prices[sym] = data[id].usd
+      if (id && allPrices[id]?.usd) prices[sym] = allPrices[id].usd
     }
   } catch { /* return what we have */ }
   return prices
