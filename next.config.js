@@ -100,35 +100,16 @@ const nextConfig = {
 
   async headers() {
     return [
-      // ── Permissive CSP for ad iframe page only ──────────────────────────────
       {
-        source: '/ad.html',
-        headers: [
-          {
-            key: 'Content-Security-Policy',
-            value: [
-              "default-src 'self'",
-              "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.effectivegatecpm.com https://*.effectiveperformancenetwork.com https://*.adsterra.com https://*.adstera.com",
-              "style-src 'self' 'unsafe-inline'",
-              "img-src 'self' data: blob: https:",
-              "connect-src *",
-              "frame-src *",
-            ].join('; '),
-          },
-          // No X-Frame-Options here — must be embeddable by our own pages
-        ],
-      },
-
-      // ── Strict CSP for all other pages ──────────────────────────────────────
-      {
-        source: '/((?!ad\\.html$).*)',
+        source: '/(.*)',
         headers: [
           // Fix #1 (CRÍTICO): Strict CSP — removes unsafe-eval/unsafe-inline from script-src
+          // /ad.html has its own permissive CSP via <meta> tag (not affected by this header)
           { key: 'Content-Security-Policy', value: CSP },
 
           // Fix #14 (MÉDIO): Previously missing security headers
           { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
-          { key: 'X-Frame-Options', value: 'DENY' },
+          { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
           { key: 'X-Content-Type-Options', value: 'nosniff' },
           { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
           { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()' },
