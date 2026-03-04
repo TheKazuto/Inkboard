@@ -1,17 +1,24 @@
 'use client'
 
-/**
- * AdBanner — placeholder for future Adsterra banner ad units.
- *
- * The main Adsterra Social Bar ad is loaded globally in layout.tsx
- * and renders as a floating overlay (no container needed).
- *
- * To add in-page banner ads:
- * 1. Create a "Banner" ad unit in your Adsterra dashboard
- * 2. You'll receive an `atOptions` object + script URL
- * 3. Replace this placeholder with that code
- */
+// ─── COMPONENT ────────────────────────────────────────────────────────────────
+// Loads Adsterra inside an iframe pointing to /ad.html which is served
+// with its own permissive CSP (allows unsafe-eval that Adsterra needs).
+// The main page keeps its strict CSP untouched.
 export default function AdBanner({ className = '' }: { className?: string }) {
-  // Hidden placeholder — no visible space taken until banner format is configured
-  return null
+  return (
+    <div className={`overflow-hidden ${className}`} style={{ minHeight: 80 }}>
+      <iframe
+        src="/ad.html"
+        style={{
+          width: '100%',
+          height: '100%',
+          border: 'none',
+          minHeight: 80,
+          overflow: 'hidden',
+        }}
+        scrolling="no"
+        loading="lazy"
+      />
+    </div>
+  )
 }

@@ -13,10 +13,10 @@ if (process.env.NODE_ENV === "development") {
 const CSP = [
   "default-src 'self'",
 
-  // Scripts: self + Adsterra + unsafe-inline (required by Next.js 14 SSR hydration scripts)
+  // Scripts: self + unsafe-inline (required by Next.js 14 SSR hydration scripts)
   // unsafe-eval remains REMOVED — prevents eval()/Function() injection attacks.
-  // Note: full removal of unsafe-inline requires nonce-based CSP (future improvement).
-  "script-src 'self' 'unsafe-inline' https://*.effectivegatecpm.com https://*.effectiveperformancenetwork.com https://*.adsterra.com https://*.adstera.com",
+  // Adsterra scripts only run inside /ad.html (has its own permissive CSP).
+  "script-src 'self' 'unsafe-inline'",
 
   // Styles: unsafe-inline is OK here — it cannot cause script execution
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
@@ -59,10 +59,6 @@ const CSP = [
     "https://mainnet.optimism.io",
     "https://mainnet.base.org",
     "https://api.avax.network",
-    "https://*.effectivegatecpm.com",
-    "https://*.effectiveperformancenetwork.com",
-    "https://*.adsterra.com",
-    "https://*.adstera.com",
     "https://api.web3modal.org",
     "https://api-core.curve.finance",
     "https://inkyswap.com",
@@ -76,8 +72,8 @@ const CSP = [
     "https://explorer.inkonchain.com",
   ].join(' '),
 
-  // Frames: Adsterra ad iframes
-  "frame-src https://*.effectivegatecpm.com https://*.effectiveperformancenetwork.com https://*.adsterra.com https://*.adstera.com",
+  // Frames: 'self' for /ad.html iframe + Adsterra domains for nested ad frames
+  "frame-src 'self' https://*.effectivegatecpm.com https://*.effectiveperformancenetwork.com https://*.adsterra.com https://*.adstera.com",
 
   // Workers
   "worker-src 'self' blob:",
@@ -104,8 +100,28 @@ const nextConfig = {
 
   async headers() {
     return [
+      // ── Permissive CSP for ad iframe page only ──────────────────────────────
       {
-        source: '/(.*)',
+        source: '/ad.html',
+        headers: [
+          {
+            key: 'Content-Security-Policy',
+            value: [
+              "default-src 'self'",
+              "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.effectivegatecpm.com https://*.effectiveperformancenetwork.com https://*.adsterra.com https://*.adstera.com",
+              "style-src 'self' 'unsafe-inline'",
+              "img-src 'self' data: blob: https:",
+              "connect-src *",
+              "frame-src *",
+            ].join('; '),
+          },
+          // No X-Frame-Options here — must be embeddable by our own pages
+        ],
+      },
+
+      // ── Strict CSP for all other pages ──────────────────────────────────────
+      {
+        source: '/((?!ad\\.html$).*)',
         headers: [
           // Fix #1 (CRÍTICO): Strict CSP — removes unsafe-eval/unsafe-inline from script-src
           { key: 'Content-Security-Policy', value: CSP },
