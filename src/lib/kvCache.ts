@@ -66,23 +66,28 @@ const memStore = new Map<string, string>()
  * @returns          `{ data, fresh }` — data is null on complete miss.
  */
 export async function kvGet<T>(key: string, softTtlMs: number): Promise<CacheResult<T>> {
+  let raw: string | null = null
+
+  // Try KV first
   try {
     const kv = await getKV()
-    let raw: string | null = null
+    if (kv) raw = await kv.get(key, 'text')
+  } catch (e) {
+    console.error(`[kvCache] KV get(${key}) failed, using memStore:`, e)
+  }
 
-    if (kv) {
-      raw = await kv.get(key, 'text')
-    } else {
-      raw = memStore.get(key) ?? null
-    }
+  // Fall back to in-memory if KV miss or KV failed
+  if (raw === null) {
+    raw = memStore.get(key) ?? null
+  }
 
-    if (!raw) return { data: null, fresh: false }
+  if (!raw) return { data: null, fresh: false }
 
+  try {
     const envelope: Envelope<T> = JSON.parse(raw)
     const age = Date.now() - envelope.t
     return { data: envelope.d, fresh: age < softTtlMs }
-  } catch (e) {
-    console.error(`[kvCache] get(${key}) error:`, e)
+  } catch {
     return { data: null, fresh: false }
   }
 }
@@ -96,17 +101,19 @@ export async function kvGet<T>(key: string, softTtlMs: number): Promise<CacheRes
  *                      Should be ≥ 2× the soft TTL to keep stale fallback available.
  */
 export async function kvSet<T>(key: string, data: T, hardTtlSec: number): Promise<void> {
-  try {
-    const envelope: Envelope<T> = { d: data, t: Date.now() }
-    const raw = JSON.stringify(envelope)
+  const envelope: Envelope<T> = { d: data, t: Date.now() }
+  const raw = JSON.stringify(envelope)
 
+  // Always write to in-memory (guarantees same-isolate cache works)
+  memStore.set(key, raw)
+
+  // Also try KV for cross-isolate persistence
+  try {
     const kv = await getKV()
     if (kv) {
       await kv.put(key, raw, { expirationTtl: Math.max(60, hardTtlSec) })
-    } else {
-      memStore.set(key, raw)
     }
   } catch (e) {
-    console.error(`[kvCache] set(${key}) error:`, e)
+    console.error(`[kvCache] KV set(${key}) failed, memStore still updated:`, e)
   }
 }
