@@ -5,7 +5,7 @@ import { NextRequest, NextResponse } from 'next/server'
 // on Cloudflare Workers with OpenNext.
 const CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://richinfo.co https://*.richinfo.co https://*.richads.com https://*.push.world https://www.gstatic.com https://*.googleapis.com https://*.firebaseio.com https://*.firebase.googleapis.com",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://richinfo.co https://*.richinfo.co https://*.richads.com https://*.push.world https://www.gstatic.com https://*.convers.link https://us.convers.link https://*.googleapis.com https://*.firebaseio.com https://*.firebase.googleapis.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com data:",
   "img-src 'self' data: blob: http: https:",
@@ -39,7 +39,7 @@ const CSP = [
     "https://mainnet.base.org",
     "https://api.avax.network",
     "https://richinfo.co",
-    "https://www.gstatic.com",
+    "https://www.gstatic.com https://*.convers.link https://us.convers.link",
     "https://*.googleapis.com",
     "https://*.firebaseio.com",
     "https://*.firebase.googleapis.com",
