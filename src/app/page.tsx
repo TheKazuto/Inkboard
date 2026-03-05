@@ -244,7 +244,9 @@ function DeFiPositions() {
               <div key={`${pos.protocol}-${i}`} className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className="text-xl">{pos.logo}</span>
+                    {pos.logo?.startsWith('http')
+                      ? <img src={pos.logo} alt={pos.protocol} width={24} height={24} className="rounded-full object-cover" />
+                      : <span className="text-xl">{pos.logo}</span>}
                     <div>
                       <p className="text-sm font-semibold text-gray-800">{pos.protocol}</p>
                       <p className="text-xs text-gray-400">

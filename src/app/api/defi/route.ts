@@ -497,115 +497,137 @@ async function fetchCurve(user: string): Promise<any[]> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// NADO — NLP Vault position (USDT0 market-making vault)
+// NADO — Trading deposits + NLP Vault position
 // ═══════════════════════════════════════════════════════════════════════════════
 const NADO_GATEWAY = 'https://gateway.prod.nado.xyz/v1'
+const NADO_LOGO    = 'https://icons.llama.fi/nado.png'
 
 function buildNadoSubaccount(address: string): string {
   // Nado subaccount = wallet address (20 bytes) + "default" padded to 12 bytes
-  // "default" in hex = 64656661756c74, padded to 12 bytes = 64656661756c740000000000
   return address.toLowerCase() + '64656661756c740000000000'
+}
+
+// Known Nado spot product IDs (trading deposits)
+const NADO_SPOT_PRODUCTS: Record<number, string> = {
+  0: 'USDT0', 1: 'wETH', 3: 'wBTC', 5: 'USDC',
 }
 
 async function fetchNado(user: string): Promise<any[]> {
   try {
     const subaccount = buildNadoSubaccount(user)
+    const headers = { Accept: 'application/json', 'Accept-Encoding': 'gzip' }
 
-    // Query subaccount info + NLP pool info in parallel
-    const headers: Record<string, string> = {
-      'Accept': 'application/json',
-      'Accept-Encoding': 'gzip',
-    }
-
-    const [subRes, nlpRes] = await Promise.all([
+    // Query subaccount info + max NLP burnable (shows vault position value) in parallel
+    const [subRes, nlpBurnRes] = await Promise.all([
       fetch(`${NADO_GATEWAY}/query?type=subaccount_info&subaccount=${subaccount}`, {
         headers, signal: AbortSignal.timeout(10_000),
       }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`${NADO_GATEWAY}/query?type=nlp_locked_balances&subaccount=${subaccount}`, {
+      fetch(`${NADO_GATEWAY}/query?type=max_nlp_burnable&subaccount=${subaccount}`, {
         headers, signal: AbortSignal.timeout(10_000),
       }).then(r => r.ok ? r.json() : null).catch(() => null),
     ])
 
-    const positions: any[] = []
-
-    // Check if user has a Nado subaccount
     const subData = subRes?.data
     if (!subData?.exists) return []
 
-    // ── NLP Vault position ──────────────────────────────────────────────────
-    // NLP locked balances show the user's vault deposit
-    const nlpBalances = nlpRes?.data?.locked_balances ?? []
-    for (const lb of nlpBalances) {
-      // amount is in x18 format (USDT0-denominated)
-      const amountX18 = parseFloat(lb.amount ?? '0')
-      if (amountX18 === 0) continue
-      const amountUSD = amountX18 / 1e18
+    const positions: any[] = []
 
-      if (amountUSD < 0.01) continue
-
-      positions.push({
-        protocol: 'Nado', type: 'vault',
-        logo: 'https://icons.llamao.fi/icons/protocols/nado?w=48&h=48',
-        url: 'https://app.nado.xyz/vault', chain: 'Ink',
-        label: 'NLP Vault (USDT0)',
-        tokens: ['USDT0'],
-        amountUSD,
-        apy: 0, // variable APY — shown on Best APRs page instead
-        netValueUSD: amountUSD, inRange: null,
-      })
+    // ── 1. NLP Vault position ──────────────────────────────────────────────
+    // max_nlp_burnable returns the USDT0 value the user would receive
+    const maxBurnable = nlpBurnRes?.data
+    if (maxBurnable) {
+      // Try both possible response formats
+      const nlpAmount = parseFloat(maxBurnable.max_burnable ?? maxBurnable.amount ?? '0') / 1e18
+      if (nlpAmount > 0.01) {
+        positions.push({
+          protocol: 'Nado', type: 'vault',
+          logo: NADO_LOGO,
+          url: 'https://app.nado.xyz/vault', chain: 'Ink',
+          label: 'NLP Vault (USDT0)',
+          tokens: ['USDT0'],
+          amountUSD: nlpAmount, apy: 0,
+          netValueUSD: nlpAmount, inRange: null,
+        })
+      }
     }
 
-    // If no locked balances found, check spot_balances for NLP product (product_id varies)
+    // Also check spot_balances for NLP product (unknown product IDs = likely NLP)
     if (positions.length === 0) {
       const spotBalances = subData.spot_balances ?? []
       for (const sb of spotBalances) {
-        // NLP positions are identified by having a product type related to NLP
-        // Product 0 is USDT0 (the quote token), others are spot assets
-        // Check for any significant USDT0-denominated position as potential NLP
-        const amount = parseFloat(sb.balance?.amount ?? '0')
-        if (amount === 0) continue
+        const productId = sb.product_id ?? sb.product?.product_id
+        // Skip known spot products — unknown ones are likely NLP tokens
+        if (productId !== undefined && !(productId in NADO_SPOT_PRODUCTS)) {
+          const amount = parseFloat(sb.balance?.amount ?? '0') / 1e18
+          if (amount > 0.01) {
+            positions.push({
+              protocol: 'Nado', type: 'vault',
+              logo: NADO_LOGO,
+              url: 'https://app.nado.xyz/vault', chain: 'Ink',
+              label: 'NLP Vault',
+              tokens: ['USDT0'],
+              amountUSD: amount, apy: 0,
+              netValueUSD: amount, inRange: null,
+            })
+          }
+        }
       }
     }
 
-    // ── Spot deposits (collateral in Nado trading account) ──────────────────
-    // Product ID mapping for Nado on Ink
-    const NADO_PRODUCTS: Record<number, { symbol: string; decimals: number }> = {
-      0: { symbol: 'USDT0', decimals: 6 },
-      1: { symbol: 'wETH', decimals: 18 },
-      3: { symbol: 'wBTC', decimals: 8 },
-      5: { symbol: 'USDC', decimals: 6 },
-    }
-
+    // ── 2. Spot deposits (trading collateral) ──────────────────────────────
     const spotBalances = subData.spot_balances ?? []
     for (const sb of spotBalances) {
       const productId = sb.product_id ?? sb.product?.product_id
-      const product = NADO_PRODUCTS[productId]
-      if (!product) continue
+      const symbol = NADO_SPOT_PRODUCTS[productId]
+      if (!symbol) continue
 
-      // Amounts are normalized to 18 decimals by the API
       const amount = parseFloat(sb.balance?.amount ?? '0') / 1e18
       if (Math.abs(amount) < 0.0001) continue
 
-      // Get USD value — stables = $1, others need price lookup
       let usdValue = 0
-      if (STABLES.has(product.symbol)) {
+      if (STABLES.has(symbol)) {
         usdValue = Math.abs(amount)
       } else {
-        const prices = await getTokenPricesUSD([product.symbol])
-        usdValue = Math.abs(amount) * (prices[product.symbol] ?? 0)
+        const prices = await getTokenPricesUSD([symbol])
+        usdValue = Math.abs(amount) * (prices[symbol] ?? 0)
       }
-
       if (usdValue < 0.01) continue
 
       positions.push({
         protocol: 'Nado', type: 'deposit',
-        logo: 'https://icons.llamao.fi/icons/protocols/nado?w=48&h=48',
+        logo: NADO_LOGO,
         url: 'https://app.nado.xyz/portfolio', chain: 'Ink',
-        label: `${product.symbol} Deposit`,
-        tokens: [product.symbol],
-        amountUSD: usdValue,
-        apy: 0,
+        label: `${symbol} Deposit`,
+        tokens: [symbol],
+        amountUSD: usdValue, apy: 0,
         netValueUSD: amount > 0 ? usdValue : -usdValue,
+        inRange: null,
+      })
+    }
+
+    // ── 3. Perp positions ──────────────────────────────────────────────────
+    const perpBalances = subData.perp_balances ?? []
+    for (const pb of perpBalances) {
+      const productId = pb.product_id ?? pb.product?.product_id
+      const amount = parseFloat(pb.balance?.amount ?? '0') / 1e18
+      if (Math.abs(amount) < 0.0001) continue
+
+      const vQuote = parseFloat(pb.balance?.v_quote_balance ?? '0') / 1e18
+      const side = amount > 0 ? 'Long' : 'Short'
+      const notional = Math.abs(vQuote)
+      if (notional < 0.01) continue
+
+      // Unrealized PnL = current value - entry cost
+      const pnl = amount > 0 ? notional + vQuote : -(notional + vQuote)
+
+      positions.push({
+        protocol: 'Nado', type: 'perp',
+        logo: NADO_LOGO,
+        url: 'https://app.nado.xyz/perpetuals', chain: 'Ink',
+        label: `Perp ${side} (Product ${productId})`,
+        tokens: [],
+        amountUSD: notional, apy: 0,
+        netValueUSD: notional,
         inRange: null,
       })
     }

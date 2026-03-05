@@ -33,6 +33,8 @@ function allStable(tokens: string[]): boolean {
 }
 
 // ─── Protocol metadata (DefiLlama project slug → display info) ──────────────
+const NADO_LOGO = 'https://icons.llama.fi/nado.png'
+
 const PROTOCOL_META: Record<string, { name: string; logo: string; urlBase: string }> = {
   'velodrome-v3':   { name: 'Velodrome V3', logo: 'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48', urlBase: 'https://velodrome.finance/liquidity?filters=Ink' },
   'velodrome-v2':   { name: 'Velodrome V2', logo: 'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48', urlBase: 'https://velodrome.finance/liquidity?filters=Ink' },
@@ -40,7 +42,7 @@ const PROTOCOL_META: Record<string, { name: string; logo: string; urlBase: strin
   'curve-dex':      { name: 'Curve',        logo: 'https://icons.llamao.fi/icons/protocols/curve-dex?w=48&h=48',    urlBase: 'https://curve.fi/#/ink/pools' },
   'tydro':          { name: 'Tydro',        logo: 'https://icons.llamao.fi/icons/protocols/tydro?w=48&h=48',       urlBase: 'https://app.tydro.com' },
   'inkyswap':       { name: 'InkySwap',     logo: 'https://icons.llamao.fi/icons/protocols/inkyswap?w=48&h=48',    urlBase: 'https://inkyswap.com/liquidity' },
-  'nado':           { name: 'Nado',         logo: 'https://icons.llamao.fi/icons/protocols/nado?w=48&h=48',        urlBase: 'https://app.nado.xyz/vault' },
+  'nado':           { name: 'Nado',         logo: NADO_LOGO,                                                       urlBase: 'https://app.nado.xyz/vault' },
 }
 
 function inferType(project: string, poolMeta: string | null): 'pool' | 'vault' | 'lend' {
@@ -304,9 +306,73 @@ async function fetchInkySwapData(): Promise<AprEntry[]> {
   return out
 }
 
+// ─── Nado NLP Vault (direct API) ────────────────────────────────────────────
+// DefiLlama doesn't list Nado yield data, so we query Nado's API directly.
+const NADO_GATEWAY = 'https://gateway.prod.nado.xyz'
+
+async function fetchNadoVault(): Promise<AprEntry[]> {
+  const out: AprEntry[] = []
+  try {
+    const headers = { Accept: 'application/json', 'Accept-Encoding': 'gzip' }
+
+    // Fetch V2 APR data and NLP pool info in parallel
+    const [aprRes, nlpRes] = await Promise.all([
+      fetch(`${NADO_GATEWAY}/v2/apr`, { headers, signal: AbortSignal.timeout(10_000) })
+        .then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`${NADO_GATEWAY}/v1/query?type=nlp_pool_info`, { headers, signal: AbortSignal.timeout(10_000) })
+        .then(r => r.ok ? r.json() : null).catch(() => null),
+    ])
+
+    // Extract NLP vault TVL from pool info (assets in x18)
+    let vaultTVL = 0
+    const nlpPools = nlpRes?.data?.nlp_pools ?? []
+    for (const pool of nlpPools) {
+      const assets = parseFloat(pool.subaccount_info?.health?.assets ?? '0')
+      if (assets > 0) vaultTVL += assets / 1e18
+    }
+
+    // Extract APR — the V2 APR endpoint may return NLP vault yield
+    let vaultApr = 0
+    if (aprRes) {
+      // V2 APR may return various formats — try to find NLP/vault APR
+      const data = aprRes.data ?? aprRes
+      if (typeof data === 'object') {
+        // Check for nlp_apr, vault_apr, or apr field
+        vaultApr = parseFloat(data.nlp_apr ?? data.vault_apr ?? data.apr ?? '0')
+        // If data is an array, look for NLP entries
+        if (Array.isArray(data)) {
+          for (const item of data) {
+            if (item.symbol?.includes('NLP') || item.name?.includes('NLP') || item.pool?.includes('nlp')) {
+              vaultApr = parseFloat(item.apr ?? item.apy ?? '0')
+              if (item.tvl) vaultTVL = parseFloat(item.tvl)
+              break
+            }
+          }
+        }
+      }
+    }
+
+    // Only add if we have meaningful data
+    if (vaultTVL > 100 || vaultApr > 0) {
+      out.push({
+        protocol: 'Nado',
+        logo: NADO_LOGO,
+        url: 'https://app.nado.xyz/vault',
+        tokens: ['USDT0'],
+        label: 'NLP Vault',
+        apr: Math.round(vaultApr * 100) / 100,
+        tvl: vaultTVL,
+        type: 'vault',
+        isStable: true,
+      })
+    }
+  } catch (e) { console.error('[best-aprs] Nado error:', e) }
+  return out
+}
+
 // ─── DefiLlama (Tydro + Curve on Ink) ───────────────────────────────────────
-// Only fetches Tydro and Curve — Velodrome and InkySwap are handled directly above
-const LLAMA_SLUGS = new Set(['tydro', 'curve-dex', 'nado'])
+// Only fetches Tydro and Curve — Velodrome, InkySwap, Nado are handled directly above
+const LLAMA_SLUGS = new Set(['tydro', 'curve-dex'])
 
 async function fetchDefiLlama(): Promise<AprEntry[]> {
   const out: AprEntry[] = []
@@ -348,14 +414,16 @@ const HARD_TTL = 10 * 60         // 10 minutes (seconds) — KV auto-deletes
 let inflight: Promise<AprEntry[]> | null = null
 
 async function fetchAllAprs(): Promise<AprEntry[]> {
-  const [v, i, l] = await Promise.allSettled([fetchVelodromeData(), fetchInkySwapData(), fetchDefiLlama()])
+  const [v, i, n, l] = await Promise.allSettled([fetchVelodromeData(), fetchInkySwapData(), fetchNadoVault(), fetchDefiLlama()])
   const velo  = v.status === 'fulfilled' ? v.value : []
   const inky  = i.status === 'fulfilled' ? i.value : []
+  const nado  = n.status === 'fulfilled' ? n.value : []
   const llama = l.status === 'fulfilled' ? l.value : []
   if (v.status === 'rejected') console.error('[best-aprs] Velodrome failed:', v.reason)
   if (i.status === 'rejected') console.error('[best-aprs] InkySwap failed:', i.reason)
+  if (n.status === 'rejected') console.error('[best-aprs] Nado failed:', n.reason)
   if (l.status === 'rejected') console.error('[best-aprs] DefiLlama failed:', l.reason)
-  const all = [...velo, ...inky, ...llama]
+  const all = [...velo, ...inky, ...nado, ...llama]
   all.sort((a, b) => b.apr - a.apr || b.tvl - a.tvl)
   return all
 }

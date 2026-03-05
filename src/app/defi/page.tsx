@@ -356,6 +356,7 @@ const PROTOCOLS = [
   { name: 'Velodrome',  url: 'https://velodrome.finance/liquidity?chain=57073', logo: 'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48' },
   { name: 'Curve',      url: 'https://curve.fi/#/ink/pools',                   logo: 'https://icons.llamao.fi/icons/protocols/curve-dex?w=48&h=48'   },
   { name: 'InkySwap',   url: 'https://inkyswap.com/liquidity',                 logo: 'https://icons.llamao.fi/icons/protocols/inkyswap?w=48&h=48'    },
+  { name: 'Nado',       url: 'https://app.nado.xyz/vault',                     logo: 'https://icons.llama.fi/nado.png'                               },
 ]
 
 function ProtocolLogo({ src, name, size = 16 }: { src: string; name: string; size?: number }) {
