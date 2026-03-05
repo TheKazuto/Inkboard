@@ -7,21 +7,19 @@ if (process.env.NODE_ENV === "development") {
 }
 
 // ─── Content-Security-Policy ────────────────────────────────────────────────
-// Adsterra ad scripts require 'unsafe-eval' (they use eval/Function internally).
-// This is standard for sites with third-party ad networks.
 const CSP = [
   "default-src 'self'",
 
-  // Scripts: unsafe-eval required by Adsterra ad scripts
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.effectivegatecpm.com https://*.effectiveperformancenetwork.com https://*.adsterra.com",
+  // Scripts: RichAds requires unsafe-eval + unsafe-inline
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://richinfo.co https://*.richinfo.co https://*.richads.com https://*.push.world",
 
-  // Styles: unsafe-inline is OK — cannot execute scripts
+  // Styles
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
 
   // Fonts
   "font-src 'self' https://fonts.gstatic.com data:",
 
-  // Images: allow HTTP too — some ad creatives are served over HTTP
+  // Images: allow HTTP + HTTPS (ad creatives may use HTTP)
   "img-src 'self' data: blob: http: https:",
 
   // Connections: upstream APIs + ad networks
@@ -54,11 +52,10 @@ const CSP = [
     "https://mainnet.optimism.io",
     "https://mainnet.base.org",
     "https://api.avax.network",
-    "https://*.effectivegatecpm.com",
-    "https://*.effectiveperformancenetwork.com",
-    "https://*.adsterra.com",
-    "http://*.effectivegatecpm.com",
-    "http://*.adsterra.com",
+    "https://richinfo.co",
+    "https://*.richinfo.co",
+    "https://*.richads.com",
+    "https://*.push.world",
     "https://api.web3modal.org",
     "https://api-core.curve.finance",
     "https://inkyswap.com",
@@ -72,13 +69,13 @@ const CSP = [
     "https://explorer.inkonchain.com",
   ].join(' '),
 
-  // Frames: allow all — Adsterra creates iframes from various ad domains
+  // Frames
   "frame-src 'self' http: https:",
 
-  // Workers
-  "worker-src 'self' blob:",
+  // Workers: RichAds registers a service worker for push notifications
+  "worker-src 'self' blob: https://richinfo.co https://*.richinfo.co",
 
-  // Block plugins (Flash, etc.)
+  // Block plugins
   "object-src 'none'",
 ].join('; ')
 

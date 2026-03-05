@@ -1,25 +1,14 @@
 'use client'
 
-// ─── COMPONENT ────────────────────────────────────────────────────────────────
-// Loads Adsterra inside an iframe pointing to /api/ad — an API route that
-// serves the ad HTML with its own permissive CSP headers. This guarantees
-// the ad script can use eval() and load images from any source, while
-// the main page keeps its strict CSP untouched.
+/**
+ * AdBanner — placeholder for future inline banner ads.
+ *
+ * RichAds push notification ads are loaded globally in layout.tsx
+ * and work as browser push prompts — no inline container needed.
+ *
+ * This component returns null to avoid taking up empty space.
+ * If a banner ad network is added later, update this component.
+ */
 export default function AdBanner({ className = '' }: { className?: string }) {
-  return (
-    <div className={`overflow-hidden ${className}`} style={{ minHeight: 80 }}>
-      <iframe
-        src="/api/ad"
-        style={{
-          width: '100%',
-          height: '100%',
-          border: 'none',
-          minHeight: 80,
-          overflow: 'hidden',
-        }}
-        scrolling="no"
-        loading="lazy"
-      />
-    </div>
-  )
+  return null
 }
