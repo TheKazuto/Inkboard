@@ -1,5 +1,4 @@
 import type { Metadata } from 'next'
-import Script from 'next/script'
 import './globals.css'
 import Navbar from '@/components/Navbar'
 import BottomBar from '@/components/BottomBar'
@@ -28,10 +27,11 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
-        {/* RichAds push notification script */}
-        <Script
+        {/* RichAds push notification — must be type="module" as required */}
+        <script
+          type="module"
           src="https://richinfo.co/richpartners/push/js/rp-cl-ob.js?pubid=1004166&siteid=389833&niche=33"
-          strategy="afterInteractive"
+          async
           data-cfasync="false"
         />
       </head>
