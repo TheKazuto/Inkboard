@@ -497,18 +497,137 @@ async function fetchCurve(user: string): Promise<any[]> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// MAIN — 4 protocols in parallel
+// NADO — NLP Vault position (USDT0 market-making vault)
+// ═══════════════════════════════════════════════════════════════════════════════
+const NADO_GATEWAY = 'https://gateway.prod.nado.xyz/v1'
+
+function buildNadoSubaccount(address: string): string {
+  // Nado subaccount = wallet address (20 bytes) + "default" padded to 12 bytes
+  // "default" in hex = 64656661756c74, padded to 12 bytes = 64656661756c740000000000
+  return address.toLowerCase() + '64656661756c740000000000'
+}
+
+async function fetchNado(user: string): Promise<any[]> {
+  try {
+    const subaccount = buildNadoSubaccount(user)
+
+    // Query subaccount info + NLP pool info in parallel
+    const headers: Record<string, string> = {
+      'Accept': 'application/json',
+      'Accept-Encoding': 'gzip',
+    }
+
+    const [subRes, nlpRes] = await Promise.all([
+      fetch(`${NADO_GATEWAY}/query?type=subaccount_info&subaccount=${subaccount}`, {
+        headers, signal: AbortSignal.timeout(10_000),
+      }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`${NADO_GATEWAY}/query?type=nlp_locked_balances&subaccount=${subaccount}`, {
+        headers, signal: AbortSignal.timeout(10_000),
+      }).then(r => r.ok ? r.json() : null).catch(() => null),
+    ])
+
+    const positions: any[] = []
+
+    // Check if user has a Nado subaccount
+    const subData = subRes?.data
+    if (!subData?.exists) return []
+
+    // ── NLP Vault position ──────────────────────────────────────────────────
+    // NLP locked balances show the user's vault deposit
+    const nlpBalances = nlpRes?.data?.locked_balances ?? []
+    for (const lb of nlpBalances) {
+      // amount is in x18 format (USDT0-denominated)
+      const amountX18 = parseFloat(lb.amount ?? '0')
+      if (amountX18 === 0) continue
+      const amountUSD = amountX18 / 1e18
+
+      if (amountUSD < 0.01) continue
+
+      positions.push({
+        protocol: 'Nado', type: 'vault',
+        logo: 'https://icons.llamao.fi/icons/protocols/nado?w=48&h=48',
+        url: 'https://app.nado.xyz/vault', chain: 'Ink',
+        label: 'NLP Vault (USDT0)',
+        tokens: ['USDT0'],
+        amountUSD,
+        apy: 0, // variable APY — shown on Best APRs page instead
+        netValueUSD: amountUSD, inRange: null,
+      })
+    }
+
+    // If no locked balances found, check spot_balances for NLP product (product_id varies)
+    if (positions.length === 0) {
+      const spotBalances = subData.spot_balances ?? []
+      for (const sb of spotBalances) {
+        // NLP positions are identified by having a product type related to NLP
+        // Product 0 is USDT0 (the quote token), others are spot assets
+        // Check for any significant USDT0-denominated position as potential NLP
+        const amount = parseFloat(sb.balance?.amount ?? '0')
+        if (amount === 0) continue
+      }
+    }
+
+    // ── Spot deposits (collateral in Nado trading account) ──────────────────
+    // Product ID mapping for Nado on Ink
+    const NADO_PRODUCTS: Record<number, { symbol: string; decimals: number }> = {
+      0: { symbol: 'USDT0', decimals: 6 },
+      1: { symbol: 'wETH', decimals: 18 },
+      3: { symbol: 'wBTC', decimals: 8 },
+      5: { symbol: 'USDC', decimals: 6 },
+    }
+
+    const spotBalances = subData.spot_balances ?? []
+    for (const sb of spotBalances) {
+      const productId = sb.product_id ?? sb.product?.product_id
+      const product = NADO_PRODUCTS[productId]
+      if (!product) continue
+
+      // Amounts are normalized to 18 decimals by the API
+      const amount = parseFloat(sb.balance?.amount ?? '0') / 1e18
+      if (Math.abs(amount) < 0.0001) continue
+
+      // Get USD value — stables = $1, others need price lookup
+      let usdValue = 0
+      if (STABLES.has(product.symbol)) {
+        usdValue = Math.abs(amount)
+      } else {
+        const prices = await getTokenPricesUSD([product.symbol])
+        usdValue = Math.abs(amount) * (prices[product.symbol] ?? 0)
+      }
+
+      if (usdValue < 0.01) continue
+
+      positions.push({
+        protocol: 'Nado', type: 'deposit',
+        logo: 'https://icons.llamao.fi/icons/protocols/nado?w=48&h=48',
+        url: 'https://app.nado.xyz/portfolio', chain: 'Ink',
+        label: `${product.symbol} Deposit`,
+        tokens: [product.symbol],
+        amountUSD: usdValue,
+        apy: 0,
+        netValueUSD: amount > 0 ? usdValue : -usdValue,
+        inRange: null,
+      })
+    }
+
+    return positions
+  } catch (e) { console.error('[defi] Nado error:', e); return [] }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN — 5 protocols in parallel
 // ═══════════════════════════════════════════════════════════════════════════════
 export async function GET(req: NextRequest) {
   const address = req.nextUrl.searchParams.get('address')
   if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address))
     return NextResponse.json({ error: 'Invalid address' }, { status: 400 })
 
-  const [tydroR, veloR, inkyR, curveR] = await Promise.allSettled([
+  const [tydroR, veloR, inkyR, curveR, nadoR] = await Promise.allSettled([
     fetchTydro(address),
     fetchVelodrome(address),
     fetchInkySwap(address),
     fetchCurve(address),
+    fetchNado(address),
   ])
 
   function unwrap(r: PromiseSettledResult<any[]>): any[] {
@@ -518,6 +637,7 @@ export async function GET(req: NextRequest) {
   const allPositions = [
     ...unwrap(tydroR), ...unwrap(veloR),
     ...unwrap(inkyR),  ...unwrap(curveR),
+    ...unwrap(nadoR),
   ]
 
   const totalNetValueUSD = allPositions.reduce((s, p) => s + (p.netValueUSD ?? 0), 0)

@@ -40,12 +40,13 @@ const PROTOCOL_META: Record<string, { name: string; logo: string; urlBase: strin
   'curve-dex':      { name: 'Curve',        logo: 'https://icons.llamao.fi/icons/protocols/curve-dex?w=48&h=48',    urlBase: 'https://curve.fi/#/ink/pools' },
   'tydro':          { name: 'Tydro',        logo: 'https://icons.llamao.fi/icons/protocols/tydro?w=48&h=48',       urlBase: 'https://app.tydro.com' },
   'inkyswap':       { name: 'InkySwap',     logo: 'https://icons.llamao.fi/icons/protocols/inkyswap?w=48&h=48',    urlBase: 'https://inkyswap.com/liquidity' },
+  'nado':           { name: 'Nado',         logo: 'https://icons.llamao.fi/icons/protocols/nado?w=48&h=48',        urlBase: 'https://app.nado.xyz/vault' },
 }
 
 function inferType(project: string, poolMeta: string | null): 'pool' | 'vault' | 'lend' {
   const p = project.toLowerCase(), m = (poolMeta ?? '').toLowerCase()
   if (p.includes('tydro') || m.includes('lend') || m.includes('supply') || m.includes('borrow')) return 'lend'
-  if (m.includes('vault') || m.includes('auto')) return 'vault'
+  if (p.includes('nado') || m.includes('vault') || m.includes('auto') || m.includes('nlp')) return 'vault'
   return 'pool'
 }
 
@@ -303,14 +304,9 @@ async function fetchInkySwapData(): Promise<AprEntry[]> {
   return out
 }
 
-// ─── DefiLlama (ALL Ink protocols including Velodrome) ──────────────────────
-// DefiLlama is the PRIMARY source for Velodrome because GeckoTerminal
-// rate-limits on cold start (3 concurrent requests → 429).
-// When GeckoTerminal succeeds, its data replaces DefiLlama's (more granular).
-const LLAMA_SLUGS = new Set([
-  'tydro', 'curve-dex',
-  'velodrome-v2', 'velodrome-v3', 'velodrome',
-])
+// ─── DefiLlama (Tydro + Curve on Ink) ───────────────────────────────────────
+// Only fetches Tydro and Curve — Velodrome and InkySwap are handled directly above
+const LLAMA_SLUGS = new Set(['tydro', 'curve-dex', 'nado'])
 
 async function fetchDefiLlama(): Promise<AprEntry[]> {
   const out: AprEntry[] = []
@@ -352,28 +348,14 @@ const HARD_TTL = 10 * 60         // 10 minutes (seconds) — KV auto-deletes
 let inflight: Promise<AprEntry[]> | null = null
 
 async function fetchAllAprs(): Promise<AprEntry[]> {
-  // DefiLlama + InkySwap are reliable — always fetch them.
-  // GeckoTerminal Velodrome is optional enrichment (rate-limits on cold start).
   const [v, i, l] = await Promise.allSettled([fetchVelodromeData(), fetchInkySwapData(), fetchDefiLlama()])
-  const geckoVelo = v.status === 'fulfilled' ? v.value : []
-  const inky      = i.status === 'fulfilled' ? i.value : []
-  const llama     = l.status === 'fulfilled' ? l.value : []
-  if (v.status === 'rejected') console.error('[best-aprs] Velodrome/Gecko failed:', v.reason)
+  const velo  = v.status === 'fulfilled' ? v.value : []
+  const inky  = i.status === 'fulfilled' ? i.value : []
+  const llama = l.status === 'fulfilled' ? l.value : []
+  if (v.status === 'rejected') console.error('[best-aprs] Velodrome failed:', v.reason)
   if (i.status === 'rejected') console.error('[best-aprs] InkySwap failed:', i.reason)
   if (l.status === 'rejected') console.error('[best-aprs] DefiLlama failed:', l.reason)
-
-  // Split DefiLlama results: Velodrome entries vs others (Tydro, Curve)
-  const llamaVelo  = llama.filter(e => e.protocol.startsWith('Velodrome'))
-  const llamaOther = llama.filter(e => !e.protocol.startsWith('Velodrome'))
-
-  // Use GeckoTerminal Velodrome data if available (more granular per-pool),
-  // otherwise fall back to DefiLlama Velodrome data (always available)
-  const veloData = geckoVelo.length > 0 ? geckoVelo : llamaVelo
-  if (geckoVelo.length === 0 && llamaVelo.length > 0) {
-    console.warn(`[best-aprs] GeckoTerminal empty, using ${llamaVelo.length} DefiLlama Velodrome pools`)
-  }
-
-  const all = [...veloData, ...inky, ...llamaOther]
+  const all = [...velo, ...inky, ...llama]
   all.sort((a, b) => b.apr - a.apr || b.tvl - a.tvl)
   return all
 }
