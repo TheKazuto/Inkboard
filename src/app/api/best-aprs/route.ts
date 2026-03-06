@@ -307,45 +307,70 @@ async function fetchInkySwapData(): Promise<AprEntry[]> {
 }
 
 // ─── Nado NLP Vault (direct from Nado API) ──────────────────────────────────
-// Queries nlp_pool_info to get vault TVL from real on-chain data.
-// NLP yield is variable (market-making PnL), not a fixed APR.
+// TVL from nlp_pool_info, APR from archive nlp_snapshots (30-day rolling).
 const NADO_GATEWAY = 'https://gateway.prod.nado.xyz'
+const NADO_ARCHIVE = 'https://archive.prod.nado.xyz/v1'
 
 async function fetchNadoVault(): Promise<AprEntry[]> {
   try {
-    const res = await fetch(`${NADO_GATEWAY}/v1/query?type=nlp_pool_info`, {
-      headers: { Accept: 'application/json', 'Accept-Encoding': 'gzip' },
-      signal: AbortSignal.timeout(10_000),
-    })
-    if (!res.ok) return []
-    const json = await res.json()
-    const pools = json?.data?.nlp_pools ?? []
+    const headers = { Accept: 'application/json', 'Accept-Encoding': 'gzip', 'Content-Type': 'application/json' }
+
+    // Fetch pool info (TVL + current NLP price) and NLP snapshots (for APR) in parallel
+    const now = Math.floor(Date.now() / 1000)
+    const thirtyDaysAgo = now - 30 * 86400
+
+    const [poolRes, snapRes] = await Promise.all([
+      fetch(`${NADO_GATEWAY}/v1/query?type=nlp_pool_info`, {
+        headers, signal: AbortSignal.timeout(10_000),
+      }).then(r => r.ok ? r.json() : null).catch(() => null),
+      // Archive indexer: POST with JSON body for nlp_snapshots
+      fetch(NADO_ARCHIVE, {
+        method: 'POST', headers, signal: AbortSignal.timeout(10_000),
+        body: JSON.stringify({ nlp_snapshots: { timestamp: thirtyDaysAgo } }),
+      }).then(r => r.ok ? r.json() : null).catch(() => null),
+    ])
+
+    const pools = poolRes?.data?.nlp_pools ?? []
     if (pools.length === 0) return []
 
-    // NLP TVL = total NLP supply × NLP oracle price
-    // NLP is product_id 11 in spot_products
-    let nlpSupply = 0, nlpPrice = 0
+    // Extract current NLP price + supply from pool info
+    let nlpSupply = 0, nlpPriceNow = 0
     for (const pool of pools) {
-      const spotProducts = pool.subaccount_info?.spot_products ?? []
-      for (const sp of spotProducts) {
+      for (const sp of (pool.subaccount_info?.spot_products ?? [])) {
         if (sp.product_id === 11) {
-          nlpSupply = parseFloat(sp.state?.total_deposits_normalized ?? '0') / 1e18
-          nlpPrice  = parseFloat(sp.oracle_price_x18 ?? '0') / 1e18
+          nlpSupply   = parseFloat(sp.state?.total_deposits_normalized ?? '0') / 1e18
+          nlpPriceNow = parseFloat(sp.oracle_price_x18 ?? '0') / 1e18
           break
         }
       }
       if (nlpSupply > 0) break
     }
 
-    const totalTVL = nlpSupply * nlpPrice
+    const totalTVL = nlpSupply * nlpPriceNow
     if (totalTVL < 100) return []
 
-    // APR: NLP started at $1.00 — price appreciation = cumulative yield
-    // Nado launched Nov 20 2025; annualize based on days since launch
-    const LAUNCH = new Date('2025-11-20').getTime()
-    const daysSinceLaunch = Math.max(1, (Date.now() - LAUNCH) / 86_400_000)
-    const yieldSinceInception = nlpPrice > 1 ? (nlpPrice - 1.0) : 0
-    const annualizedApr = yieldSinceInception * (365 / daysSinceLaunch) * 100
+    // Calculate APR from NLP snapshots (30-day rolling)
+    let apr = 0
+    const snapshots = snapRes?.snapshots ?? snapRes?.data?.snapshots ?? snapRes?.nlp_snapshots ?? (Array.isArray(snapRes) ? snapRes : [])
+    if (snapshots.length > 0) {
+      // Find oldest snapshot from ~30 days ago
+      let oldestPrice = 0
+      for (const snap of snapshots) {
+        const price = parseFloat(snap.share_price_x18 ?? snap.price_x18 ?? snap.nlp_price_x18 ?? snap.price ?? '0')
+        if (price > 0) { oldestPrice = price / (price > 1e15 ? 1e18 : 1); break }
+      }
+      if (oldestPrice > 0 && nlpPriceNow > oldestPrice) {
+        const yieldPeriod = (nlpPriceNow - oldestPrice) / oldestPrice
+        apr = yieldPeriod * (365 / 30) * 100
+      }
+    }
+
+    // Fallback: use inception-based APR if snapshots didn't work
+    if (apr <= 0 && nlpPriceNow > 1.0) {
+      const LAUNCH = new Date('2025-11-20').getTime()
+      const daysSinceLaunch = Math.max(1, (Date.now() - LAUNCH) / 86_400_000)
+      apr = (nlpPriceNow - 1.0) * (365 / daysSinceLaunch) * 100
+    }
 
     return [{
       protocol: 'Nado',
@@ -353,7 +378,7 @@ async function fetchNadoVault(): Promise<AprEntry[]> {
       url: 'https://app.nado.xyz/vault',
       tokens: ['USDT0'],
       label: 'NLP Vault',
-      apr: Math.round(annualizedApr * 100) / 100,
+      apr: Math.round(apr * 100) / 100,
       tvl: totalTVL,
       type: 'vault',
       isStable: false,
