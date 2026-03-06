@@ -76,7 +76,7 @@ function AprCard({ entry, rank, showType = false }: { entry: AprEntry; rank: num
       {/* Logo + Info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-1.5">
-          {entry.logo.startsWith('http') ? (
+          {entry.logo.startsWith('http') || entry.logo.startsWith('/') ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={entry.logo} alt={entry.protocol} width={20} height={20} className="rounded-md object-contain" />
           ) : (

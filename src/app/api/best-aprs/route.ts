@@ -340,16 +340,23 @@ async function fetchNadoVault(): Promise<AprEntry[]> {
     const totalTVL = nlpSupply * nlpPrice
     if (totalTVL < 100) return []
 
+    // APR: NLP started at $1.00 — price appreciation = cumulative yield
+    // Nado launched Nov 20 2025; annualize based on days since launch
+    const LAUNCH = new Date('2025-11-20').getTime()
+    const daysSinceLaunch = Math.max(1, (Date.now() - LAUNCH) / 86_400_000)
+    const yieldSinceInception = nlpPrice > 1 ? (nlpPrice - 1.0) : 0
+    const annualizedApr = yieldSinceInception * (365 / daysSinceLaunch) * 100
+
     return [{
       protocol: 'Nado',
       logo: NADO_LOGO,
       url: 'https://app.nado.xyz/vault',
       tokens: ['USDT0'],
       label: 'NLP Vault',
-      apr: 0, // Variable yield from market-making PnL
+      apr: Math.round(annualizedApr * 100) / 100,
       tvl: totalTVL,
       type: 'vault',
-      isStable: true,
+      isStable: false,
     }]
   } catch (e) { console.error('[best-aprs] Nado error:', e); return [] }
 }
