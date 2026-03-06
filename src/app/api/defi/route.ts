@@ -497,44 +497,57 @@ async function fetchCurve(user: string): Promise<any[]> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// NADO — NLP Vault position (on-chain balanceOf + Nado API for oracle price)
+// NADO — NLP Vault position (via Nado gateway subaccount_info API)
+// NLP tokens live inside Nado's subaccount system, NOT as ERC-20 in wallet.
 // ═══════════════════════════════════════════════════════════════════════════════
-const NLP_TOKEN    = '0xf9e0af5e093c6ff7d75983414826462fc4abe430'
 const NADO_LOGO    = '/nado-logo.jpg'
 const NADO_GATEWAY = 'https://gateway.prod.nado.xyz/v1'
 
 async function fetchNado(user: string): Promise<any[]> {
   try {
-    // Step 1: Check user's NLP token balance on-chain (simple balanceOf)
-    const [balRes] = await rpcBatch([ethCall(NLP_TOKEN, balanceOfData(user), 900)])
-    const nlpBalance = decodeUint(balRes?.result ?? '0x')
-    if (nlpBalance === 0n) return []
+    // Build subaccount: address (20 bytes) + "default" (12 bytes, hex-encoded)
+    // "default" = 64656661756c74 padded to 12 bytes = 64656661756c740000000000
+    const addr = user.toLowerCase().replace('0x', '')
+    const subaccount = '0x' + addr + '64656661756c740000000000'
 
-    // Step 2: Get NLP oracle price from Nado API
-    let nlpPrice = 1.0 // fallback: ~$1 per NLP
-    try {
-      const res = await fetch(`${NADO_GATEWAY}/query?type=nlp_pool_info`, {
-        headers: { Accept: 'application/json', 'Accept-Encoding': 'gzip' },
-        signal: AbortSignal.timeout(8_000),
-      })
-      if (res.ok) {
-        const json = await res.json()
-        const pools = json?.data?.nlp_pools ?? []
-        for (const pool of pools) {
-          const products = pool.subaccount_info?.spot_products ?? []
-          for (const sp of products) {
-            if (sp.product_id === 11) {
-              nlpPrice = parseFloat(sp.oracle_price_x18 ?? '0') / 1e18
-              break
-            }
-          }
-          if (nlpPrice > 0 && nlpPrice !== 1.0) break
-        }
+    // Use POST to avoid URL-encoding issues with H256 hex strings
+    const headers = { 'Content-Type': 'application/json', Accept: 'application/json', 'Accept-Encoding': 'gzip' }
+
+    const res = await fetch(`${NADO_GATEWAY}/query`, {
+      method: 'POST', headers, signal: AbortSignal.timeout(10_000),
+      body: JSON.stringify({ type: 'subaccount_info', subaccount }),
+    })
+    if (!res.ok) return []
+    const json = await res.json()
+
+    const subData = json?.data
+    if (!subData?.exists) return []
+
+    // Find NLP balance (product_id 11) and its oracle price
+    const spotBalances  = subData.spot_balances ?? []
+    const spotProducts  = subData.spot_products ?? []
+
+    let nlpAmount = 0n
+    for (const sb of spotBalances) {
+      if (sb.product_id === 11) {
+        nlpAmount = BigInt(sb.balance?.amount ?? '0')
+        break
       }
-    } catch { /* use fallback price */ }
+    }
 
-    // Step 3: Calculate USD value
-    const nlpTokens = Number(nlpBalance) / 1e18
+    // User has no NLP position
+    if (nlpAmount <= 0n) return []
+
+    // Get NLP oracle price from spot_products
+    let nlpPrice = 1.0
+    for (const sp of spotProducts) {
+      if (sp.product_id === 11) {
+        nlpPrice = parseFloat(sp.oracle_price_x18 ?? '0') / 1e18
+        break
+      }
+    }
+
+    const nlpTokens = Number(nlpAmount) / 1e18
     const usdValue  = nlpTokens * nlpPrice
     if (usdValue < 0.01) return []
 
