@@ -107,7 +107,7 @@ function LendingCard({ pos }: { pos: any }) {
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-xl overflow-hidden">
-            {pos.logo?.startsWith('http')
+            {pos.logo?.startsWith('http') || pos.logo?.startsWith('/')
               // eslint-disable-next-line @next/next/no-img-element
               ? <img src={pos.logo} alt={pos.protocol} width={40} height={40} className="rounded-full object-cover" />
               : pos.logo}
@@ -193,7 +193,7 @@ function VaultCard({ pos }: { pos: any }) {
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-xl overflow-hidden">
-            {pos.logo?.startsWith('http')
+            {pos.logo?.startsWith('http') || pos.logo?.startsWith('/')
               // eslint-disable-next-line @next/next/no-img-element
               ? <img src={pos.logo} alt={pos.protocol} width={40} height={40} className="rounded-full object-cover" />
               : pos.logo}
@@ -237,7 +237,7 @@ function LiquidityCard({ pos }: { pos: any }) {
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-xl overflow-hidden">
-            {pos.logo?.startsWith('http')
+            {pos.logo?.startsWith('http') || pos.logo?.startsWith('/')
               // eslint-disable-next-line @next/next/no-img-element
               ? <img src={pos.logo} alt={pos.protocol} width={40} height={40} className="rounded-full object-cover" />
               : pos.logo}
@@ -356,11 +356,11 @@ const PROTOCOLS = [
   { name: 'Velodrome',  url: 'https://velodrome.finance/liquidity?chain=57073', logo: 'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48' },
   { name: 'Curve',      url: 'https://curve.fi/#/ink/pools',                   logo: 'https://icons.llamao.fi/icons/protocols/curve-dex?w=48&h=48'   },
   { name: 'InkySwap',   url: 'https://inkyswap.com/liquidity',                 logo: 'https://icons.llamao.fi/icons/protocols/inkyswap?w=48&h=48'    },
-  { name: 'Nado',       url: 'https://app.nado.xyz/vault',                     logo: 'https://icons.llama.fi/nado.png'                               },
+  { name: 'Nado',       url: 'https://app.nado.xyz/vault',                     logo: '/nado-logo.jpg'                                                },
 ]
 
 function ProtocolLogo({ src, name, size = 16 }: { src: string; name: string; size?: number }) {
-  if (src.startsWith('http'))
+  if (src.startsWith('http') || src.startsWith('/'))
     // eslint-disable-next-line @next/next/no-img-element
     return <img src={src} alt={name} width={size} height={size} className="rounded-full object-contain" />
   return <span>{src}</span>

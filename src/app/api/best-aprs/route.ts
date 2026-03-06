@@ -33,7 +33,7 @@ function allStable(tokens: string[]): boolean {
 }
 
 // ─── Protocol metadata (DefiLlama project slug → display info) ──────────────
-const NADO_LOGO = 'https://icons.llama.fi/nado.png'
+const NADO_LOGO = '/nado-logo.jpg'
 
 const PROTOCOL_META: Record<string, { name: string; logo: string; urlBase: string }> = {
   'velodrome-v3':   { name: 'Velodrome V3', logo: 'https://icons.llamao.fi/icons/protocols/velodrome-v2?w=48&h=48', urlBase: 'https://velodrome.finance/liquidity?filters=Ink' },
@@ -306,72 +306,56 @@ async function fetchInkySwapData(): Promise<AprEntry[]> {
   return out
 }
 
-// ─── Nado NLP Vault (direct API) ────────────────────────────────────────────
-// DefiLlama doesn't list Nado yield data, so we query Nado's API directly.
+// ─── Nado NLP Vault (direct from Nado API) ──────────────────────────────────
+// Queries nlp_pool_info to get vault TVL from real on-chain data.
+// NLP yield is variable (market-making PnL), not a fixed APR.
 const NADO_GATEWAY = 'https://gateway.prod.nado.xyz'
 
 async function fetchNadoVault(): Promise<AprEntry[]> {
-  const out: AprEntry[] = []
   try {
-    const headers = { Accept: 'application/json', 'Accept-Encoding': 'gzip' }
+    const res = await fetch(`${NADO_GATEWAY}/v1/query?type=nlp_pool_info`, {
+      headers: { Accept: 'application/json', 'Accept-Encoding': 'gzip' },
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!res.ok) return []
+    const json = await res.json()
+    const pools = json?.data?.nlp_pools ?? []
+    if (pools.length === 0) return []
 
-    // Fetch V2 APR data and NLP pool info in parallel
-    const [aprRes, nlpRes] = await Promise.all([
-      fetch(`${NADO_GATEWAY}/v2/apr`, { headers, signal: AbortSignal.timeout(10_000) })
-        .then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`${NADO_GATEWAY}/v1/query?type=nlp_pool_info`, { headers, signal: AbortSignal.timeout(10_000) })
-        .then(r => r.ok ? r.json() : null).catch(() => null),
-    ])
-
-    // Extract NLP vault TVL from pool info (assets in x18)
-    let vaultTVL = 0
-    const nlpPools = nlpRes?.data?.nlp_pools ?? []
-    for (const pool of nlpPools) {
-      const assets = parseFloat(pool.subaccount_info?.health?.assets ?? '0')
-      if (assets > 0) vaultTVL += assets / 1e18
-    }
-
-    // Extract APR — the V2 APR endpoint may return NLP vault yield
-    let vaultApr = 0
-    if (aprRes) {
-      // V2 APR may return various formats — try to find NLP/vault APR
-      const data = aprRes.data ?? aprRes
-      if (typeof data === 'object') {
-        // Check for nlp_apr, vault_apr, or apr field
-        vaultApr = parseFloat(data.nlp_apr ?? data.vault_apr ?? data.apr ?? '0')
-        // If data is an array, look for NLP entries
-        if (Array.isArray(data)) {
-          for (const item of data) {
-            if (item.symbol?.includes('NLP') || item.name?.includes('NLP') || item.pool?.includes('nlp')) {
-              vaultApr = parseFloat(item.apr ?? item.apy ?? '0')
-              if (item.tvl) vaultTVL = parseFloat(item.tvl)
-              break
-            }
-          }
+    // NLP TVL = total NLP supply × NLP oracle price
+    // NLP is product_id 11 in spot_products
+    let nlpSupply = 0, nlpPrice = 0
+    for (const pool of pools) {
+      const spotProducts = pool.subaccount_info?.spot_products ?? []
+      for (const sp of spotProducts) {
+        if (sp.product_id === 11) {
+          nlpSupply = parseFloat(sp.state?.total_deposits_normalized ?? '0') / 1e18
+          nlpPrice  = parseFloat(sp.oracle_price_x18 ?? '0') / 1e18
+          break
         }
       }
+      if (nlpSupply > 0) break
     }
 
-    // Only add if we have meaningful data
-    if (vaultTVL > 100 || vaultApr > 0) {
-      out.push({
-        protocol: 'Nado',
-        logo: NADO_LOGO,
-        url: 'https://app.nado.xyz/vault',
-        tokens: ['USDT0'],
-        label: 'NLP Vault',
-        apr: Math.round(vaultApr * 100) / 100,
-        tvl: vaultTVL,
-        type: 'vault',
-        isStable: true,
-      })
-    }
-  } catch (e) { console.error('[best-aprs] Nado error:', e) }
-  return out
+    const totalTVL = nlpSupply * nlpPrice
+    if (totalTVL < 100) return []
+
+    return [{
+      protocol: 'Nado',
+      logo: NADO_LOGO,
+      url: 'https://app.nado.xyz/vault',
+      tokens: ['USDT0'],
+      label: 'NLP Vault',
+      apr: 0, // Variable yield from market-making PnL
+      tvl: totalTVL,
+      type: 'vault',
+      isStable: true,
+    }]
+  } catch (e) { console.error('[best-aprs] Nado error:', e); return [] }
 }
 
 // ─── DefiLlama (Tydro + Curve on Ink) ───────────────────────────────────────
-// Only fetches Tydro and Curve — Velodrome, InkySwap, Nado are handled directly above
+// Only fetches Tydro and Curve — Velodrome and InkySwap are handled directly above
 const LLAMA_SLUGS = new Set(['tydro', 'curve-dex'])
 
 async function fetchDefiLlama(): Promise<AprEntry[]> {
