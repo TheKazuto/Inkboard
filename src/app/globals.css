@@ -291,3 +291,14 @@ body {
 /* Dividers */
 [data-theme="dark"] .divide-gray-50 > :not([hidden]) ~ :not([hidden]) { border-color: #1e1a2e !important; }
 [data-theme="dark"] .divide-gray-100 > :not([hidden]) ~ :not([hidden]) { border-color: #262240 !important; }
+
+/* Swap page route details — opacity variants */
+[data-theme="dark"] .bg-violet-50\/50 { background-color: rgba(124, 58, 237, 0.06) !important; }
+[data-theme="dark"] .bg-amber-50\/60 { background-color: rgba(245, 158, 11, 0.08) !important; }
+[data-theme="dark"] .bg-red-50\/80 { background-color: rgba(239, 68, 68, 0.1) !important; }
+[data-theme="dark"] .bg-amber-50\/80 { background-color: rgba(245, 158, 11, 0.1) !important; }
+[data-theme="dark"] .divide-violet-100\/60 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(124, 58, 237, 0.15) !important; }
+[data-theme="dark"] .divide-amber-100\/60 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(245, 158, 11, 0.15) !important; }
+
+/* Swap modals */
+[data-theme="dark"] .shadow-2xl { box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5) !important; }
