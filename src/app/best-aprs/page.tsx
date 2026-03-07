@@ -24,9 +24,9 @@ const REFRESH_INTERVAL_MS = 5 * 60 * 1000  // 5 minutes
 // ─── APR badge ────────────────────────────────────────────────────────────────
 function AprBadge({ apr }: { apr: number }) {
   const color =
-    apr >= 20 ? 'bg-emerald-100 text-emerald-700 border-emerald-200' :
-    apr >= 10 ? 'bg-violet-100 text-violet-700 border-violet-200' :
-    apr >= 5  ? 'bg-blue-100   text-blue-700   border-blue-200'   :
+    apr >= 20 ? 'bg-emerald-100 text-emerald-700 border-emerald-200 dark-badge-white' :
+    apr >= 10 ? 'bg-violet-100 text-violet-700 border-violet-200 dark-badge-white' :
+    apr >= 5  ? 'bg-blue-100   text-blue-700   border-blue-200   dark-badge-white' :
                 'bg-gray-100   text-gray-600   border-gray-200'
 
   return (
