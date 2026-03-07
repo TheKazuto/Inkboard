@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { SORA } from '@/lib/styles'
-import { TrendingUp, TrendingDown, Flame } from 'lucide-react'
+import { TrendingUp, TrendingDown } from 'lucide-react'
 
 interface Gainer {
   symbol: string
@@ -73,16 +73,11 @@ export default function TopEarners() {
   return (
     <div className="card p-5">
       {/* Header */}
-      <div className="flex items-center gap-2 mb-4">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-orange-400 to-red-500 flex items-center justify-center">
-          <Flame size={16} className="text-white" />
-        </div>
-        <div>
-          <h3 className="font-semibold text-gray-800" style={SORA}>
-            Top Earners in the Ecosystem
-          </h3>
-          <p className="text-xs text-gray-400">24 hours</p>
-        </div>
+      <div className="mb-4">
+        <h3 className="font-semibold text-gray-800" style={SORA}>
+          Top Earners in the Ecosystem
+        </h3>
+        <p className="text-xs text-gray-400">24 hours</p>
       </div>
 
       {loading ? (
@@ -148,7 +143,7 @@ function TokenRow({ token, rank }: { token: Gainer; rank: number }) {
 
       {/* Name + Price */}
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-gray-800 truncate group-hover:text-violet-600 transition-colors">
+        <p className="text-sm font-semibold text-gray-800 dark-token-name truncate group-hover:text-violet-600 transition-colors">
           {token.symbol}
         </p>
         <p className="text-xs text-gray-400">{formatPrice(token.priceUsd)}</p>

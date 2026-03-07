@@ -75,8 +75,8 @@ export async function GET() {
       const baseTokenId = pool.relationships?.base_token?.data?.id ?? ''
       const address = baseTokenId.split('_').pop() ?? ''
 
-      // Skip stablecoins and wrapped native tokens as "gainers"
-      const skipSymbols = ['USDT0', 'USDC', 'USDC.e', 'WETH', 'wETH', 'USDT', 'DAI', 'crvUSD', 'frxUSD']
+      // Skip only wrapped native tokens (they duplicate ETH price action)
+      const skipSymbols = ['WETH', 'wETH']
       if (skipSymbols.includes(baseSymbol)) continue
 
       // Skip pools with very low volume (likely spam)

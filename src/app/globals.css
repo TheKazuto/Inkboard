@@ -308,3 +308,6 @@ body {
 [data-theme="dark"] .dark-badge-white { color: #ffffff !important; }
 [data-theme="dark"] .bg-blue-100 { background-color: rgba(59, 130, 246, 0.15) !important; }
 [data-theme="dark"] .border-blue-200 { border-color: rgba(59, 130, 246, 0.25) !important; }
+
+/* Top Earners token name — violet in dark mode for readability */
+[data-theme="dark"] .dark-token-name { color: #c4b5fd !important; }
