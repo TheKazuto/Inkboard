@@ -4,9 +4,9 @@ import { useState } from 'react'
 import { useWallet }        from '@/contexts/WalletContext'
 import { usePortfolio }     from '@/contexts/PortfolioContext'
 import { usePreferences }   from '@/contexts/PreferencesContext'
-import type { Currency, TimeRange } from '@/contexts/PreferencesContext'
+import type { Currency, TimeRange, Theme } from '@/contexts/PreferencesContext'
 import { CURRENCIES, CURRENCY_LABELS } from '@/contexts/PreferencesContext'
-import { User, Copy, ExternalLink, Shield, CheckCircle, Lock } from 'lucide-react'
+import { User, Copy, ExternalLink, Shield, CheckCircle, Lock, Sun, Moon } from 'lucide-react'
 import { shortenAddr } from '@/contexts/TransactionContext'
 
 // Single stable object reference — avoids creating a new object on every render
@@ -18,7 +18,7 @@ export default function AccountPage() {
 
   const { address, isConnected, disconnect } = useWallet()
   const { totals, status } = usePortfolio()
-  const { currency, defaultRange, setCurrency, setDefaultRange, fmtValue, rates, ratesUpdatedAt } = usePreferences()
+  const { currency, defaultRange, theme, setCurrency, setDefaultRange, setTheme, fmtValue, rates, ratesUpdatedAt } = usePreferences()
 
   const isLoading = status === 'loading'
 
@@ -130,6 +130,36 @@ export default function AccountPage() {
       <div className="card p-5">
         <h2 className="font-display font-semibold text-gray-800 mb-4" style={SORA}>Preferences</h2>
         <div className="space-y-4">
+          {/* Theme */}
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-800">Appearance</p>
+              <p className="text-xs text-gray-400">Switch between light and dark mode</p>
+            </div>
+            <button
+              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+              className={`relative w-16 h-8 rounded-full transition-all duration-300 ${
+                theme === 'dark'
+                  ? 'bg-violet-600'
+                  : 'bg-violet-100 border border-violet-200'
+              }`}
+              aria-label="Toggle theme"
+            >
+              <div
+                className={`absolute top-1 w-6 h-6 rounded-full flex items-center justify-center transition-all duration-300 ${
+                  theme === 'dark'
+                    ? 'left-9 bg-violet-900'
+                    : 'left-1 bg-white shadow-sm'
+                }`}
+              >
+                {theme === 'dark'
+                  ? <Moon size={14} className="text-violet-300" />
+                  : <Sun size={14} className="text-violet-500" />
+                }
+              </div>
+            </button>
+          </div>
+
           {/* Currency */}
           <div className="flex items-center justify-between">
             <div>

@@ -7,7 +7,7 @@ import { LayoutDashboard, Wallet, BarChart3, History, User, Menu, X, Zap, ArrowL
 import { ConnectButton } from '@rainbow-me/rainbowkit'
 
 // Stable style object for the logo wordmark
-const LOGO_STYLE = { fontFamily: 'Plus Jakarta Sans, sans-serif', fontWeight: 700, color: '#1E1B4B', fontSize: '1.125rem' } as const
+const LOGO_STYLE = { fontFamily: 'Plus Jakarta Sans, sans-serif', fontWeight: 700, color: 'var(--text-primary)', fontSize: '1.125rem' } as const
 
 const navLinks = [
   { href: '/',             label: 'Dashboard',      icon: LayoutDashboard },

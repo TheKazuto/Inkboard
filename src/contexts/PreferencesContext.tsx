@@ -4,6 +4,7 @@ import { createContext, useContext, useState, useEffect, useCallback, ReactNode 
 
 export type Currency = 'USD' | 'EUR' | 'BRL'
 export type TimeRange = '7d' | '30d' | '90d' | '1y'
+export type Theme = 'light' | 'dark'
 
 const SYMBOLS: Record<Currency, string> = {
   USD: '$',
@@ -29,20 +30,24 @@ const FALLBACK_RATES: Record<Currency, number> = {
 interface PreferencesContextValue {
   currency:        Currency
   defaultRange:    TimeRange
+  theme:           Theme
   rates:           Record<Currency, number>
   ratesUpdatedAt:  string | null
   setCurrency:     (c: Currency) => void
   setDefaultRange: (r: TimeRange) => void
+  setTheme:        (t: Theme) => void
   fmtValue:        (usd: number) => string
 }
 
 const PreferencesContext = createContext<PreferencesContextValue>({
   currency:       'USD',
   defaultRange:   '30d',
+  theme:          'light',
   rates:          FALLBACK_RATES,
   ratesUpdatedAt: null,
   setCurrency:     () => {},
   setDefaultRange: () => {},
+  setTheme:        () => {},
   fmtValue:        (v) => `$${v.toFixed(2)}`,
 })
 
@@ -53,6 +58,7 @@ export function usePreferences() {
 export function PreferencesProvider({ children }: { children: ReactNode }) {
   const [currency,        setCurrencyState]     = useState<Currency>('USD')
   const [defaultRange,    setDefaultRangeState] = useState<TimeRange>('30d')
+  const [theme,           setThemeState]        = useState<Theme>('light')
   const [rates,           setRates]             = useState<Record<Currency, number>>(FALLBACK_RATES)
   const [ratesUpdatedAt,  setRatesUpdatedAt]    = useState<string | null>(null)
 
@@ -61,10 +67,17 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     try {
       const c = localStorage.getItem('mb_currency') as Currency | null
       const r = localStorage.getItem('mb_range')    as TimeRange | null
+      const t = localStorage.getItem('mb_theme')    as Theme | null
       if (c && ['USD', 'EUR', 'BRL'].includes(c))       setCurrencyState(c)
       if (r && ['7d', '30d', '90d', '1y'].includes(r))  setDefaultRangeState(r)
+      if (t && ['light', 'dark'].includes(t))            setThemeState(t)
     } catch {}
   }, [])
+
+  // ── Apply theme to <html> element ─────────────────────────────────────────
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+  }, [theme])
 
   // ── Fetch live exchange rates from our API route ───────────────────────────
   useEffect(() => {
@@ -103,6 +116,11 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     try { localStorage.setItem('mb_range', r) } catch {}
   }
 
+  const setTheme = (t: Theme) => {
+    setThemeState(t)
+    try { localStorage.setItem('mb_theme', t) } catch {}
+  }
+
   // ── Format a USD value into the selected currency ──────────────────────────
   // Wrapped in useCallback so the reference only changes when currency or rates
   // change — prevents unnecessary re-renders of all context consumers.
@@ -119,8 +137,8 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 
   return (
     <PreferencesContext.Provider value={{
-      currency, defaultRange, rates, ratesUpdatedAt,
-      setCurrency, setDefaultRange, fmtValue,
+      currency, defaultRange, theme, rates, ratesUpdatedAt,
+      setCurrency, setDefaultRange, setTheme, fmtValue,
     }}>
       {children}
     </PreferencesContext.Provider>
