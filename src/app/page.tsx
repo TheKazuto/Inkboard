@@ -33,7 +33,7 @@ function WalletSummary() {
 
   return (
     <div className="card p-6 relative overflow-hidden"
-      style={{ background: 'linear-gradient(135deg, #7C3AED 0%, #6d28d9 100%)' }}>
+      style={{ background: 'linear-gradient(135deg, #836EF9 0%, #6d28d9 100%)' }}>
 
       {/* Decorative blobs */}
       <div className="absolute top-0 right-0 w-64 h-64 rounded-full opacity-10"
@@ -226,7 +226,7 @@ function DeFiPositions() {
 
       {/* No positions found */}
       {isConnected && !loading && top3.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-8 gap-2 text-center">
+        <div className="flex flex-col items-center justify-center py-16 gap-2 text-center">
           <p className="text-sm text-gray-400">No DeFi positions found</p>
           <p className="text-xs text-gray-300">Your active positions will appear here</p>
         </div>
@@ -245,9 +245,7 @@ function DeFiPositions() {
               <div key={`${pos.protocol}-${i}`} className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    {pos.logo?.startsWith('http') || pos.logo?.startsWith('/')
-                      ? <img src={pos.logo} alt={pos.protocol} width={24} height={24} className="rounded-full object-cover" />
-                      : <span className="text-xl">{pos.logo}</span>}
+                    <span className="text-xl">{pos.logo}</span>
                     <div>
                       <p className="text-sm font-semibold text-gray-800">{pos.protocol}</p>
                       <p className="text-xs text-gray-400">
@@ -339,7 +337,7 @@ export default function Dashboard() {
       {/* Portfolio History Chart */}
       <PortfolioHistory />
 
-      {/* Top Earners — 24h gainers in the Ink ecosystem */}
+      {/* Top Earners — 24h gainers in the Monad ecosystem */}
       <TopEarners />
 
       {/* Bottom Row: Top Tokens + Fear & Greed + Ad */}
