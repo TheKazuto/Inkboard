@@ -26,8 +26,8 @@ const AD_HTML = `<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <script async="async" data-cfasync="false" src="https://pl28910513.effectivegatecpm.com/9fff4c2be37c4994f8ffb267b94c0fa6/invoke.js"></script>
-  <div id="container-9fff4c2be37c4994f8ffb267b94c0fa6"></div>
+  <script async="async" data-cfasync="false" src="https://pl28909561.effectivegatecpm.com/ff4f26cf6832320f8139de3639dc511c/invoke.js"></script>
+  <div id="container-ff4f26cf6832320f8139de3639dc511c"></div>
 </body>
 </html>`
 
@@ -35,8 +35,7 @@ export async function GET() {
   return new NextResponse(AD_HTML, {
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      // Sem X-Frame-Options nesta rota — o middleware já remove para este path
-      // (veja src/middleware.ts)
+      // Sem CSP nesta rota — o iframe é same-origin, não third-party
       'Cache-Control': 'no-store',
     },
   })

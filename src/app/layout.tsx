@@ -5,16 +5,16 @@ import BottomBar from '@/components/BottomBar'
 import Providers from '@/components/Providers'
 
 export const metadata: Metadata = {
-  title: 'InkBoard — Your Ink DeFi Dashboard',
-  description: 'The ultimate dashboard for the Ink ecosystem. Track your portfolio, DeFi positions, NFTs and get real-time alerts.',
-  keywords: ['ink', 'blockchain', 'portfolio', 'defi', 'nft', 'dashboard', 'kraken', 'superchain'],
+  title: 'MonBoard — Your Monad DeFi Dashboard',
+  description: 'The ultimate dashboard for the Monad ecosystem. Track your portfolio, DeFi positions, NFTs and get real-time alerts.',
+  keywords: ['monad', 'blockchain', 'portfolio', 'defi', 'nft', 'dashboard', 'mon'],
   icons: {
     icon: '/favicon.ico',
     apple: '/apple-touch-icon.png',
   },
   openGraph: {
-    title: 'InkBoard',
-    description: 'Your Ink DeFi Dashboard',
+    title: 'MonBoard',
+    description: 'Your Monad DeFi Dashboard',
     type: 'website',
   },
 }
