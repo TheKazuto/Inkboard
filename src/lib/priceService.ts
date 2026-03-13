@@ -1,20 +1,13 @@
 /**
  * priceService.ts — Centralized CoinGecko price fetcher.
  *
- * Consolidates ALL `/simple/price` calls into a single request.
- * Previously, ink.ts, defi/route, and best-aprs/route each made their own
- * CoinGecko call — up to 3 separate requests for overlapping data.
- *
- * Now: ONE call fetches prices for every known Ink token + VELO + ETH,
- * cached in KV for 60s. All routes consume from this shared cache.
- *
- * CoinGecko calls saved: 2–3 per session.
+ * ONE call fetches prices for every known Ink token + VELO + ETH,
+ * cached in KV for 5 minutes. All routes consume from this shared cache.
  */
 
 import { kvGet, kvSet } from '@/lib/kvCache'
 
-// ─── All CoinGecko IDs used across the project ──────────────────────────────
-// Superset of: KNOWN_TOKENS coingeckoIds + velodrome + ethereum
+// ─── All CoinGecko IDs used across the project ────────────────────────────────
 const ALL_PRICE_IDS = [
   'ethereum',
   'weth',
@@ -38,17 +31,16 @@ export interface PriceEntry {
 }
 export type PriceMap = Record<CoinId, PriceEntry>
 
-// ─── Cache config ─────────────────────────────────────────────────────────────
+// ─── Cache config ──────────────────────────────────────────────────────────────
+// SOFT_TTL increased from 60s → 5min: price data this fresh is more than adequate
+// for a DeFi dashboard, and reduces CoinGecko calls by 5×.
+const CACHE_KEY = 'cg-prices'
+const SOFT_TTL  = 5 * 60 * 1000  // 5 minutes (ms) — fresh window
+const HARD_TTL  = 15 * 60        // 15 minutes (seconds) — stale fallback window
 
-const CACHE_KEY   = 'cg-prices'
-const SOFT_TTL    = 60_000      // 60s — fresh window
-const HARD_TTL    = 5 * 60      // 5 min — KV expiration (seconds)
-
-// In-memory inflight dedup (same-isolate only, still useful)
 let inflight: Promise<PriceMap> | null = null
 
 // ─── Fetcher ──────────────────────────────────────────────────────────────────
-
 async function fetchFromCoinGecko(): Promise<PriceMap> {
   const apiKey  = process.env.COINGECKO_API_KEY
   const headers: Record<string, string> = { 'Accept': 'application/json' }
@@ -60,7 +52,6 @@ async function fetchFromCoinGecko(): Promise<PriceMap> {
   const res = await fetch(url, {
     headers,
     signal: AbortSignal.timeout(10_000),
-    next: { revalidate: 60 },
   })
   if (!res.ok) throw new Error(`CoinGecko HTTP ${res.status}`)
 
@@ -68,8 +59,8 @@ async function fetchFromCoinGecko(): Promise<PriceMap> {
   const out: PriceMap = {}
   for (const [id, data] of Object.entries(raw as Record<string, any>)) {
     out[id] = {
-      usd:             data?.usd ?? 0,
-      usd_24h_change:  data?.usd_24h_change,
+      usd:            data?.usd ?? 0,
+      usd_24h_change: data?.usd_24h_change,
     }
   }
   return out
@@ -79,8 +70,7 @@ async function fetchFromCoinGecko(): Promise<PriceMap> {
 
 /**
  * Get prices for ALL known Ink ecosystem tokens in one shot.
- * Returns a map of coinGeckoId → { usd, usd_24h_change }.
- * Cached in KV for 60s; stale data returned on upstream failure.
+ * Cached in KV for 5 minutes; stale data returned on upstream failure.
  */
 export async function getAllPrices(): Promise<PriceMap> {
   const cached = await kvGet<PriceMap>(CACHE_KEY, SOFT_TTL)
@@ -111,7 +101,7 @@ export async function getPrice(coinId: string): Promise<number> {
   return prices[coinId]?.usd ?? 0
 }
 
-/** Convenience: get ETH price + 24h change (replaces getEthPriceData). */
+/** Convenience: get ETH price + 24h change. */
 export async function getEthPriceFromService(): Promise<{
   price: number; change24h: number; changeAmount: number
 }> {

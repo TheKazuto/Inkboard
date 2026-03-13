@@ -1,12 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { KNOWN_TOKENS, rpcBatch, buildBalanceOfCall } from '@/lib/ink'
+import { kvGet, kvSet } from '@/lib/kvCache'
 
 export const revalidate = 0
 
 // ─── Balance fetching (single RPC batch) ─────────────────────────────────────
-// Previously: 1 individual fetch per token + 1 for native = 6 HTTP requests.
-// Now: one JSON-RPC batch call returns all balances in a single round-trip.
-
 async function fetchAllBalances(address: string): Promise<{
   native: number
   tokens: number[]
@@ -39,45 +37,62 @@ async function fetchAllBalances(address: string): Promise<{
   }
 }
 
-// ─── Price history ────────────────────────────────────────────────────────────
+// ─── Price history ─────────────────────────────────────────────────────────────
+// KV cache: shared across all users — one CoinGecko call per hour per {coinId}:{days}
+// pair, regardless of how many wallets are viewed.
+// SOFT_TTL = 1h  →  fresh window (serve from cache without upstream call)
+// HARD_TTL = 2h  →  KV auto-expiry (stale fallback stays available 1h after soft miss)
+
+const PH_SOFT_TTL = 60 * 60 * 1000  // 1 hour (ms)
+const PH_HARD_TTL = 2 * 60 * 60     // 2 hours (seconds)
 
 async function fetchPriceHistory(coinId: string, days: number): Promise<[number, number][]> {
+  const cacheKey = `ph:${coinId}:${days}`
+
+  // Fast path — serve from KV if fresh
+  const cached = await kvGet<[number, number][]>(cacheKey, PH_SOFT_TTL)
+  if (cached.data && cached.fresh) return cached.data
+
   try {
-    // Fix #18 (INFO): Uses COINGECKO_API_KEY (server-only, no NEXT_PUBLIC_ prefix).
-    // Consistent with top-tokens/route.ts after fix #11.
-    const apiKey   = process.env.COINGECKO_API_KEY
+    const apiKey  = process.env.COINGECKO_API_KEY
     const headers: Record<string, string> = { 'Accept': 'application/json' }
     if (apiKey) headers['x-cg-demo-api-key'] = apiKey
-    const url      = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=${days}&interval=daily`
-    const res      = await fetch(url, { headers, next: { revalidate: 3600 } })
-    const data     = await res.json()
-    return data?.prices ?? []
-  } catch {
-    return []
+
+    const url = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=${days}&interval=daily`
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) })
+    if (!res.ok) throw new Error(`CoinGecko ${res.status}`)
+
+    const data = await res.json()
+    const prices: [number, number][] = data?.prices ?? []
+
+    if (prices.length > 0) {
+      await kvSet(cacheKey, prices, PH_HARD_TTL)
+    }
+
+    return prices
+  } catch (e) {
+    console.error(`[portfolio-history] fetchPriceHistory(${coinId}, ${days}) failed:`, e)
+    // Return stale data if available rather than empty
+    return cached.data ?? []
   }
 }
 
-// ─── Handler ─────────────────────────────────────────────────────────────────
-
+// ─── Handler ──────────────────────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   const address = req.nextUrl.searchParams.get('address')
 
-  // Fix #8 (MÉDIO): Restrict `days` to a safe allowlist.
-  // Previously, parseInt() returned NaN/-1/999999 for malformed values,
-  // which were passed directly to the CoinGecko API causing unexpected behavior.
   const VALID_DAYS = new Set([7, 30, 90, 180, 365])
-  const rawDays   = parseInt(req.nextUrl.searchParams.get('days') ?? '30', 10)
-  const days      = VALID_DAYS.has(rawDays) ? rawDays : 30
+  const rawDays    = parseInt(req.nextUrl.searchParams.get('days') ?? '30', 10)
+  const days       = VALID_DAYS.has(rawDays) ? rawDays : 30
 
   if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
     return NextResponse.json({ error: 'Invalid address' }, { status: 400 })
   }
 
   try {
-    // ── 1. Fetch all current balances in a single RPC batch ───────────────────
+    // 1. Fetch all current balances in a single RPC batch
     const { native: monBalance, tokens: tokenBalances } = await fetchAllBalances(address)
 
-    // Build coingeckoId → balance (only non-zero)
     const balances: Record<string, number> = {}
     if (monBalance > 0.0001) balances['ethereum'] = monBalance
     KNOWN_TOKENS.forEach((t, i) => {
@@ -85,23 +100,21 @@ export async function GET(req: NextRequest) {
     })
 
     const heldCoinIds = Object.keys(balances)
-
     if (heldCoinIds.length === 0) {
       return NextResponse.json({ history: [], totalValue: 0, change: 0 })
     }
 
-    // ── 2. Fetch price history for each held coin ─────────────────────────────
+    // 2. Fetch price history — now served from KV for all but the first caller per hour
     const priceHistories = await Promise.all(
       heldCoinIds.map(id => fetchPriceHistory(id, days))
     )
 
-    // ── 3. Build daily portfolio value ────────────────────────────────────────
+    // 3. Build daily portfolio value
     const referenceHistory = priceHistories[0] ?? []
     if (referenceHistory.length === 0) {
       return NextResponse.json({ history: [], totalValue: 0, change: 0 })
     }
 
-    // coinId → Map<dateStr, price>
     const priceMaps = new Map<string, Map<string, number>>()
     heldCoinIds.forEach((id, i) => {
       const map = new Map<string, number>()
