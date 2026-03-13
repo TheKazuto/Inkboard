@@ -26,6 +26,21 @@ function setSecurityHeaders(res: NextResponse): void {
   res.headers.set('X-Permitted-Cross-Domain-Policies', 'none')
 }
 
+// ─── Ad frame headers ────────────────────────────────────────────────────────
+// /api/ad-frame is loaded inside an <iframe> in AdBanner (same-origin).
+// X-Frame-Options: SAMEORIGIN on the framed page itself would block it,
+// so we apply all security headers EXCEPT X-Frame-Options for this route.
+function setAdFrameHeaders(res: NextResponse): void {
+  res.headers.set('Content-Security-Policy', CSP)
+  res.headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload')
+  // No X-Frame-Options here — intentionally omitted so the iframe can load
+  res.headers.set('X-Content-Type-Options', 'nosniff')
+  res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin')
+  res.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=()')
+  res.headers.set('X-XSS-Protection', '0')
+  res.headers.set('X-Permitted-Cross-Domain-Policies', 'none')
+}
+
 // ─── Rate limiter ────────────────────────────────────────────────────────────
 interface RateEntry { count: number; resetAt: number }
 const store = new Map<string, RateEntry>()
@@ -61,6 +76,13 @@ function getClientIp(req: NextRequest): string {
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
+
+  // Ad frame route: security headers without X-Frame-Options, no rate limiting
+  if (pathname === '/api/ad-frame') {
+    const res = NextResponse.next()
+    setAdFrameHeaders(res)
+    return res
+  }
 
   // Non-API routes: just apply security headers
   if (!pathname.startsWith('/api/')) {
