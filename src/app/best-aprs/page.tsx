@@ -189,7 +189,7 @@ function categorize(entries: AprEntry[]): AprData {
   }
 
   return {
-    stableAPRs: stableAPRs.slice(0, 10),
+    stableAPRs: stableAPRs.slice(0, 5),
     pools:      pools.slice(0, 10),
     vaults:     vaults.slice(0, 10),
     lends:      lends.slice(0, 10),
